@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.SmartTrack" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <!-- Primary brand color -->
+        <item name="colorPrimary">@color/purple_500</item>
+        <item name="colorPrimaryVariant">@color/purple_700</item>
+        <item name="colorOnPrimary">@color/white</item>
+
+        <!-- Secondary brand color -->
+        <item name="colorSecondary">@color/teal_200</item>
+        <item name="colorSecondaryVariant">@color/teal_700</item>
+        <item name="colorOnSecondary">@color/black</item>
+
+        <!-- Status bar color -->
+        <item name="android:statusBarColor">?attr/colorPrimaryVariant</item>
+
+        <!-- Window settings -->
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+
+        <!-- Toolbar style -->
+        <item name="toolbarStyle">@style/Widget.MaterialComponents.Toolbar.Primary</item>
+    </style>
+
+    <!-- Light theme variation -->
+    <style name="Theme.SmartTrack.Light" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <!-- Light theme attributes -->
+    </style>
+
+    <!-- Dark theme variation -->
+    <style name="Theme.SmartTrack.Dark" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Dark theme attributes -->
+    </style>
+</resources>

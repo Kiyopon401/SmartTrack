@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">SmartTrack</string>
+    <string name="add_vehicle">Add Vehicle</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="immobilize">Immobilize</string>
+    <string name="start_engine">Start Engine</string>
+    <string name="view_trip_history">View Trip History</string>
+    <string name="nickname">Nickname</string>
+    <string name="phone_number">Phone Number</string>
+    <string name="title_activity_login">LoginActivity</string>
+    <string name="prompt_email">Email</string>
+    <string name="prompt_password">Password</string>
+    <string name="action_sign_in">Sign in or register</string>
+    <string name="action_sign_in_short">Sign in</string>
+    <string name="welcome">"Welcome !"</string>
+    <string name="invalid_username">Not a valid username</string>
+    <string name="invalid_password">Password must be >5 characters</string>
+    <string name="login_failed">"Login failed"</string>
+    <string name="no_trip_history">No trip history available</string>
+    <string name="refresh">Refresh</string>
+    <string name="clear_history">Clear History</string>
+    <string name="default_notification_channel_id">default_channel_id</string>
+</resources>

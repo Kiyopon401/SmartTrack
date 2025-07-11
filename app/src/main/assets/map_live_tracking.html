@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>SmartTrack Map</title>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+        <link
+                rel="stylesheet"
+                href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"
+                />
+        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <style>
+            html, body, #map {
+              height: 100%;
+              margin: 0;
+              padding: 0;
+              overflow: hidden;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="map"></div>
+        <script>
+            const map = L.map("map").setView([0, 0], 15);
+            const marker = L.marker([0, 0]).addTo(map);
+            let geofenceCircle = null;
+            let geofenceRadius = 100; // meters
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors',
+                noWrap: true
+            }).addTo(map);
+
+
+
+            let isFirstUpdate = true;
+
+            function updateMarkerPosition(lat, lng, isInside = true) {
+              marker.setLatLng([lat, lng]);
+
+              if (geofenceCircle) {
+                geofenceCircle.setStyle({
+                  color: isInside ? "green" : "red",
+                  fillColor: isInside ? "#0f0" : "#f00",
+                });
+              }
+
+              if (isFirstUpdate) {
+                map.setView([lat, lng], 15);
+                isFirstUpdate = false;
+              }
+            }
+
+            function setGeofenceRadius(radius) {
+              geofenceRadius = radius;
+              if (geofenceCircle) {
+                geofenceCircle.setRadius(geofenceRadius);
+              }
+            }
+
+            function drawPath(coords) {
+              if (window.polyline) {
+                map.removeLayer(window.polyline);
+              }
+              window.polyline = L.polyline(coords, { color: "blue" }).addTo(map);
+              map.fitBounds(window.polyline.getBounds());
+            }
+
+            function clearGeofence() {
+              if (geofenceCircle) {
+                map.removeLayer(geofenceCircle);
+                geofenceCircle = null;
+              }
+            }
+
+            function drawGeofenceCircle(lat, lng, color = "green") {
+              clearGeofence();
+              geofenceCircle = L.circle([lat, lng], {
+                color: color,
+                fillColor: color === "red" ? "#f00" : "#0f3",
+                fillOpacity: 0.2,
+                radius: geofenceRadius,
+              }).addTo(map);
+            }
+
+            // Use Geolocation API to get current position on page load
+            if (navigator.geolocation) {
+              navigator.geolocation.getCurrentPosition(
+                (position) => {
+                  const lat = position.coords.latitude;
+                  const lng = position.coords.longitude;
+                  updateMarkerPosition(lat, lng, true);
+                  drawGeofenceCircle(lat, lng);
+                },
+                (error) => {
+                  console.error("Geolocation error:", error.message);
+                  // fallback - no geolocation, keep map at 0,0 or show message if you want
+                },
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+              );
+            } else {
+              console.warn("Geolocation not supported by this browser.");
+            }
+        </script>
+    </body>
+</html>

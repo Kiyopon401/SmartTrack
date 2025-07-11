@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Trip History Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <style>
+        html, body, #map {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+        #tileError {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #fff3f3;
+            color: #b00;
+            border: 1px solid #b00;
+            padding: 8px 16px;
+            border-radius: 6px;
+            z-index: 9999;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<div id="tileError">Map tiles failed to load. <button onclick="retryTiles()">Retry</button></div>
+<div id="map"></div>
+<script>
+    var map = L.map('map').setView([0, 0], 13);
+
+    var tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Tile load error handling
+    var tileErrorDiv = document.getElementById('tileError');
+    tileLayer.on('tileerror', function(e) {
+        tileErrorDiv.style.display = 'block';
+    });
+    function retryTiles() {
+        tileErrorDiv.style.display = 'none';
+        tileLayer.redraw();
+    }
+
+    // Custom markers with different colors
+    const startIcon = L.divIcon({
+        className: 'start-marker',
+        html: '<div style="background-color: red; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
+    });
+
+    const endIcon = L.divIcon({
+        className: 'end-marker',
+        html: '<div style="background-color: green; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>',
+        iconSize: [16, 16],
+        iconAnchor: [8, 8]
+    });
+
+    // Start and end markers
+    const startMarker = L.marker([0, 0], { icon: startIcon });
+    const endMarker = L.marker([0, 0], { icon: endIcon });
+
+    function drawPath(coords) {
+        console.log("drawPath called with coords:", coords);
+
+        // Clear existing layers
+        if (window.polyline) {
+            map.removeLayer(window.polyline);
+        }
+        if (window.startMarker) {
+            map.removeLayer(window.startMarker);
+        }
+        if (window.endMarker) {
+            map.removeLayer(window.endMarker);
+        }
+
+        // Draw new path and markers
+        if (coords.length > 0) {
+            window.polyline = L.polyline(coords, { color: 'blue' }).addTo(map);
+
+            window.startMarker = L.marker(coords[0], { icon: startIcon })
+                .bindPopup("Start point")
+                .addTo(map);
+
+            window.endMarker = L.marker(coords[coords.length - 1], { icon: endIcon })
+                .bindPopup("End point")
+                .addTo(map);
+
+            if (coords.length === 1) {
+                map.setView(coords[0], 16); // Zoom in on single point
+            } else {
+                map.fitBounds(window.polyline.getBounds());
+            }
+        }
+    }
+
+    // Expose a function to reset zoom to the current path
+    function resetMapZoom() {
+        if (window.polyline) {
+            var bounds = window.polyline.getBounds();
+            if (bounds.isValid()) {
+                map.fitBounds(bounds);
+            }
+        }
+    }
+
+    var liveMarker = null;
+    function updateMarkerPosition(lat, lng, isInside) {
+        if (liveMarker) {
+            map.removeLayer(liveMarker);
+        }
+        var color = isInside ? 'blue' : 'red';
+        liveMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+                className: 'live-marker',
+                html: '<div style="background-color: ' + color + '; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white;"></div>',
+                iconSize: [20, 20],
+                iconAnchor: [10, 10]
+            })
+        }).addTo(map).bindPopup(isInside ? 'Current position (inside geofence)' : 'Current position (outside geofence)');
+    }
+</script>
+</body>
+</html>
