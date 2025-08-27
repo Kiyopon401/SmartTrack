@@ -234,8 +234,8 @@ void updateGeofenceStatus(double lat, double lng) {
   String status = isOutside ? "outside" : "inside";
   if (isOutside != geofence.lastOutside) {
     geofence.lastOutside = isOutside;
-    String json = String("{\"status\":\"") + status + "\"}";
-    httpPutJson(pathVehicleRoot() + "/geofence.json", json);
+    // Update only the status subkey to preserve center/radius
+    httpPutJson(pathVehicleRoot() + "/geofence/status.json", String("\"") + status + "\"");
     Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
     if (isOutside) toneBuzzer(150);
   }
@@ -292,7 +292,12 @@ void onCommandReceived(const String &cmdRaw) {
       geofence.enabled = true;
       geofence.lastOutside = false;
       Serial.printf("Geofence set: lat=%.6f lng=%.6f r=%.2fm\n", geofence.centerLat, geofence.centerLng, geofence.radiusMeters);
-      httpPutJson(pathVehicleRoot() + "/geofence.json", "{\"status\":\"inside\"}");
+      String json = String("{") +
+                    "\"center\":{\"lat\":" + String(geofence.centerLat, 6) + ",\"lng\":" + String(geofence.centerLng, 6) + "}," +
+                    "\"radius\":" + String(geofence.radiusMeters, 0) + "," +
+                    "\"status\":\"inside\"" +
+                    "}";
+      httpPutJson(pathVehicleRoot() + "/geofence.json", json);
     } else {
       Serial.println(F("Invalid GEOFENCE_SET format"));
     }

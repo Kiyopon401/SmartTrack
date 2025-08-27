@@ -260,6 +260,58 @@ class VehicleDetailActivity : AppCompatActivity() {
                     updateConnectionStatus()
                 }
             })
+
+        // Listener for geofence updates (center, radius, status)
+        firebaseDb.reference.child("vehicles").child(deviceId).child("geofence")
+            .addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    try {
+                        if (!snapshot.exists()) {
+                            // Clear any map geofence visuals
+                            MapUtils.removeGeofenceCircle(binding.mapWebView)
+                            binding.geofenceAlert.text = ""
+                            return
+                        }
+                        val status = snapshot.child("status").getValue(String::class.java)
+                        val centerLat = snapshot.child("center").child("lat").getValue(Double::class.java)
+                        val centerLng = snapshot.child("center").child("lng").getValue(Double::class.java)
+                        val radius = snapshot.child("radius").getValue(Double::class.java)
+                        if (centerLat != null && centerLng != null && radius != null) {
+                            val color = if (status == "outside") "red" else "green"
+                            MapUtils.drawGeofenceCircle(binding.mapWebView, centerLat, centerLng, radius, color)
+                            if (status == "outside") {
+                                val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
+                                binding.geofenceAlert.text = message
+                                try {
+                                    val mediaPlayer = android.media.MediaPlayer.create(this@VehicleDetailActivity, R.raw.alert_buzzer)
+                                    mediaPlayer?.start()
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to play alert sound", e)
+                                }
+                                // Push notification
+                                try {
+                                    val builder = NotificationCompat.Builder(this@VehicleDetailActivity, "service_channel")
+                                        .setSmallIcon(R.drawable.ic_track)
+                                        .setContentTitle("Geofence Alert")
+                                        .setContentText("${currentVehicle.nickname} left the virtual area")
+                                        .setPriority(NotificationCompat.PRIORITY_HIGH)
+                                    NotificationManagerCompat.from(this@VehicleDetailActivity).notify(2002, builder.build())
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to show notification", e)
+                                }
+                            } else {
+                                binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in geofence listener", e)
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {
+                    Log.e(TAG, "Geofence listener cancelled", error.toException())
+                }
+            })
     }
 
     private fun setupConnectionStatusChecker() {
