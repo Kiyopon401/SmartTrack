@@ -168,6 +168,36 @@ object FirebaseManager {
         })
     }
 
+    fun findDeviceByMsisdn(msisdnRaw: String, callback: (String?) -> Unit) {
+        checkInitialized()
+        val msisdn = normalizePhone(msisdnRaw)
+        db.reference.child("devices").addListenerForSingleValueEvent(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                for (child in snapshot.children) {
+                    val deviceId = child.key ?: continue
+                    val simNode = child.child("sim")
+                    val simMsisdn = simNode.child("simMsisdn").getValue(String::class.java)
+                    if (!simMsisdn.isNullOrBlank()) {
+                        if (normalizePhone(simMsisdn) == msisdn) {
+                            callback(deviceId)
+                            return
+                        }
+                    }
+                }
+                callback(null)
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.e("FirebaseManager", "findDeviceByMsisdn cancelled", error.toException())
+                callback(null)
+            }
+        })
+    }
+
+    private fun normalizePhone(phone: String): String {
+        return phone.replace(" ", "").replace("-", "").trim()
+    }
+
     private fun checkInitialized() {
         if (!this::db.isInitialized) {
             throw IllegalStateException("FirebaseManager not initialized. Call initialize() first.")

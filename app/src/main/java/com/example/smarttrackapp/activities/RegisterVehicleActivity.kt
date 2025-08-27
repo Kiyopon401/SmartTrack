@@ -10,6 +10,8 @@ import com.example.smarttrackapp.models.Vehicle
 import com.google.android.material.snackbar.Snackbar
 import com.example.smarttrackapp.di.ViewModelFactory
 import com.example.smarttrackapp.App
+import com.example.smarttrackapp.utils.FirebaseManager
+import android.view.View
 
 class RegisterVehicleActivity : AppCompatActivity() {
     private lateinit var binding: ActivityRegisterVehicleBinding
@@ -24,6 +26,7 @@ class RegisterVehicleActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityRegisterVehicleBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        FirebaseManager.initialize(this)
         setupClickListeners()
     }
 
@@ -43,17 +46,31 @@ class RegisterVehicleActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            val vehicle = Vehicle(
-                nickname = nickname,
-                phoneNumber = phoneNumber,
-                color = color,
-                icon = "car"
-            )
+            // Attempt to auto-pair by SIM number (MSISDN)
+            binding.btnSave.isEnabled = false
+            binding.btnSave.text = "Checking..."
+            FirebaseManager.findDeviceByMsisdn(phoneNumber) { deviceIdOrNull ->
+                runOnUiThread {
+                    binding.btnSave.isEnabled = true
+                    binding.btnSave.text = "Save"
 
-            vehicleViewModel.insertVehicle(vehicle)
-            Snackbar.make(binding.root, "Vehicle saved!", Snackbar.LENGTH_SHORT).show()
-            setResult(RESULT_OK)
-            finish()
+                    val pairedDeviceId = deviceIdOrNull ?: ""
+                    val vehicle = Vehicle(
+                        nickname = nickname,
+                        phoneNumber = phoneNumber,
+                        color = color,
+                        icon = "car",
+                        deviceId = pairedDeviceId
+                    )
+
+                    vehicleViewModel.insertVehicle(vehicle)
+                    val msg = if (pairedDeviceId.isNotEmpty())
+                        "Vehicle saved and paired to $pairedDeviceId" else "Vehicle saved (no tracker found yet)"
+                    Snackbar.make(binding.root, msg, Snackbar.LENGTH_LONG).show()
+                    setResult(RESULT_OK)
+                    finish()
+                }
+            }
         }
 
         binding.btnCancel.setOnClickListener {
