@@ -183,7 +183,14 @@ object FirebaseManager {
                         Log.d("FirebaseManager", "Device $deviceId has no sim node")
                         continue
                     }
-                    val simMsisdn = simNode.child("simMsisdn").getValue(String::class.java)
+                    // Safely get simMsisdn value regardless of type
+                    val simMsisdnValue = simNode.child("simMsisdn").getValue()
+                    val simMsisdn = when (simMsisdnValue) {
+                        is String -> simMsisdnValue
+                        is Long -> simMsisdnValue.toString()
+                        is Int -> simMsisdnValue.toString()
+                        else -> simMsisdnValue?.toString() ?: ""
+                    }
                     Log.d("FirebaseManager", "Device $deviceId simMsisdn: $simMsisdn")
                     if (!simMsisdn.isNullOrBlank()) {
                         val normalizedSimMsisdn = normalizePhone(simMsisdn)
