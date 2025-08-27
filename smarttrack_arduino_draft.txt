@@ -1,56 +1,59 @@
-// SmartTrack DeviceTrackerCompanion (ESP32) - Arduino IDE Draft
+// SmartTrack DeviceTrackerCompanion (ESP32 + SIM800L) - Arduino IDE Draft
+//
+// Changes: Internet via SIM800L (GPRS), no WiFi. Firebase RTDB via REST over HTTPS.
 //
 // Features:
-// - WiFi + Firebase RTDB connection (mobizt Firebase ESP Client library)
-// - GPS read (TinyGPS++) and location publish to /vehicles/<DEVICE_ID>/location
-// - Command listener at /commands/<DEVICE_ID>
+// - GPRS (SIM800L + TinyGSM) + HTTPS REST (ArduinoHttpClient)
+// - GPS read (TinyGPS++) and location publish to /vehicles/<DEVICE_ID>/location.json
+// - Command polling at /commands/<DEVICE_ID>.json (string commands)
 // - Commands supported:
-//     TRACK                               -> publish one location update
-//     START_TRACKING                       -> start continuous location publish
-//     STOP                                 -> stop continuous tracking
-//     IMMOBILIZE                           -> activate relay (kill switch)
-//     UNLOCK                               -> deactivate relay
-//     PAIR:<VEHICLE_DB_ID>                 -> associate this device with a vehicle ID
-//     GEOFENCE_SET:<lat>,<lng>,<radius_m>  -> enable geofence at center with radius
-//     GEOFENCE_CLEAR                       -> disable geofence
-//     GEOFENCE_RADIUS:<radius_m>           -> update radius while enabled
-// - Geofence detection and status publish to /vehicles/<DEVICE_ID>/geofence/status
+//     TRACK, START_TRACKING, STOP, IMMOBILIZE, UNLOCK
+//     PAIR:<VEHICLE_DB_ID>
+//     GEOFENCE_SET:<lat>,<lng>,<radius_m>
+//     GEOFENCE_CLEAR
+//     GEOFENCE_RADIUS:<radius_m>
+// - Geofence detection and status publish to /vehicles/<DEVICE_ID>/geofence/status.json
 // - Heartbeat updates to /devices/<DEVICE_ID> (active, last_seen, deviceType)
 //
 // Hardware assumptions:
 // - Board: ESP32
+// - SIM800L connected to a UART (default RX=27, TX=26 here; adjust for your wiring)
 // - GPS module on Serial1 (RX=16, TX=17 by default here; adjust for your wiring)
 // - Immobilizer relay on GPIO 4 (active HIGH by default; change as needed)
 // - Optional buzzer on GPIO 5
 //
 // Arduino Library dependencies:
-// - Firebase ESP Client by mobizt (Tools -> Manage Libraries)
+// - TinyGSM by vintlabs (Tools -> Manage Libraries)
+// - ArduinoHttpClient by Arduino
 // - TinyGPS++ by Mikal Hart
 //
-// Fill in the WIFI and Firebase credentials in the CONFIG section below.
+// Fill in APN and Firebase HOST/AUTH in the CONFIG section below.
 
-#include <WiFi.h>
+#define TINY_GSM_MODEM_SIM800
+#include <TinyGsmClient.h>
+#include <ArduinoHttpClient.h>
 #include <TinyGPSPlus.h>
 #include <HardwareSerial.h>
-#include <Firebase_ESP_Client.h>
 #include <time.h>
-
-// Provide the token generation process info.
-#include "addons/TokenHelper.h"
-// Provide the RTDB payload printing helper
-#include "addons/RTDBHelper.h"
 
 // =========================
 // ====== CONFIG AREA ======
 // =========================
-#define WIFI_SSID        "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD    "YOUR_WIFI_PASSWORD"
+// Cellular APN configuration
+#define GSM_APN          "YOUR_APN"
+#define GSM_USER         ""
+#define GSM_PASS         ""
 
-// Firebase
-#define API_KEY          "YOUR_FIREBASE_WEB_API_KEY"
-#define DATABASE_URL     "https://YOUR_PROJECT_ID-default-rtdb.REGION.firebasedatabase.app"  // e.g., https://myapp-default-rtdb.firebaseio.com
+// Firebase RTDB REST host (no protocol, no trailing slash)
+// Example: "your-project-id-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define DATABASE_HOST    "YOUR_DATABASE_HOST"
 
-// Device identity (MUST be unique and registered in your RTDB "devices" tree)
+// Optional database secret or auth token. If empty, no auth query is appended.
+// Prefer using a scoped custom token or rules restricted to 
+//  /devices/DEVICE_ID and /vehicles/DEVICE_ID paths for this device.
+#define DATABASE_AUTH    ""  // e.g., "YOUR_DB_SECRET_OR_ID_TOKEN"
+
+// Device identity (unique in your RTDB "devices")
 #define DEVICE_ID        "YOUR_DEVICE_ID"
 
 // Default GPS serial pins and baud for ESP32 (adjust to match your GPS module)
@@ -58,26 +61,31 @@
 #define GPS_TX_PIN       17   // GPS RX -> ESP32 TX (GPIO17)
 #define GPS_BAUD         9600
 
+// SIM800L UART on ESP32 (adjust pins/Serial port to your wiring)
+#define MODEM_RX_PIN     27   // SIM800 TX -> ESP32 RX
+#define MODEM_TX_PIN     26   // SIM800 RX -> ESP32 TX
+#define MODEM_BAUD       9600
+
 // IO pins
 #define RELAY_PIN        4
 #define BUZZER_PIN       5
 
-// Tracking settings
-static const unsigned long TRACK_INTERVAL_MS = 10UL * 1000UL;  // 10s continuous tracking interval
-static const unsigned long HEARTBEAT_INTERVAL_MS = 10UL * 1000UL;  // heartbeat frequency
+// Timings
+static const unsigned long TRACK_INTERVAL_MS = 10UL * 1000UL;     // 10s continuous tracking interval
+static const unsigned long HEARTBEAT_INTERVAL_MS = 10UL * 1000UL; // heartbeat frequency
+static const unsigned long CMD_POLL_INTERVAL_MS = 3UL * 1000UL;   // poll commands every 3s
 
 // =========================
 // ====== GLOBALS ==========
 // =========================
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig configFB;
-
-TinyGPSPlus gps;
 HardwareSerial GPSSerial(1);
+HardwareSerial ModemSerial(2);
+TinyGPSPlus gps;
+TinyGsm modem(ModemSerial);
+TinyGsmClientSecure netClient(modem);
+HttpClient http(netClient, DATABASE_HOST, 443);
 
-bool isWifiConnected = false;
-bool firebaseReady = false;
+bool netReady = false;
 bool isTrackingContinuous = false;
 
 String pairedVehicleId = "";  // loaded via PAIR command
@@ -92,6 +100,7 @@ struct Geofence {
 
 unsigned long lastTrackPublishMs = 0;
 unsigned long lastHeartbeatMs = 0;
+unsigned long lastCmdPollMs = 0;
 
 // =========================
 // ====== HELPERS ==========
@@ -110,12 +119,14 @@ static double distanceMeters(double lat1, double lon1, double lat2, double lon2)
   return R * c;
 }
 
-static String rtdbPath(const String &p) { return String(p); }
-static String pathCommands() { return String("/commands/") + DEVICE_ID; }
-static String pathVehicleRoot() { return String("/vehicles/") + DEVICE_ID; }
-static String pathVehicleLocation() { return pathVehicleRoot() + "/location"; }
-static String pathVehicleGeofenceStatus() { return pathVehicleRoot() + "/geofence/status"; }
-static String pathDeviceRoot() { return String("/devices/") + DEVICE_ID; }
+String qAuth() {
+  if (String(DATABASE_AUTH).length() == 0) return String("");
+  return String("?auth=") + DATABASE_AUTH;
+}
+
+String pathVehicleRoot() { return String("/vehicles/") + DEVICE_ID; }
+String pathDeviceRoot()  { return String("/devices/") + DEVICE_ID; }
+String pathCommands()    { return String("/commands/") + DEVICE_ID; }
 
 void toneBuzzer(unsigned long ms) {
   digitalWrite(BUZZER_PIN, HIGH);
@@ -127,24 +138,54 @@ void setImmobilized(bool enable) {
   digitalWrite(RELAY_PIN, enable ? HIGH : LOW);
 }
 
-void publishHeartbeat() {
-  if (!firebaseReady) return;
-  const unsigned long nowMs = millis();
-  // Use epoch time if available, else millis
-  time_t nowEpoch = time(nullptr);
-  long lastSeen = nowEpoch > 100000 ? (long)nowEpoch * 1000L : (long)nowMs; // ms
+bool httpPutJson(const String &pathJson, const String &json) {
+  String fullPath = pathJson + qAuth();
+  http.beginRequest();
+  http.put(fullPath.c_str());
+  http.sendHeader("Content-Type", "application/json");
+  http.sendHeader("Content-Length", json.length());
+  http.beginBody();
+  http.print(json);
+  http.endRequest();
+  int status = http.responseStatusCode();
+  // Consume response
+  String body = http.responseBody();
+  return status >= 200 && status < 300;
+}
 
-  Firebase.RTDB.setBool(&fbdo, pathDeviceRoot() + "/active", true);
-  Firebase.RTDB.setString(&fbdo, pathDeviceRoot() + "/deviceType", "companion");
-  Firebase.RTDB.setInt(&fbdo, pathDeviceRoot() + "/last_seen", lastSeen);
+bool httpGet(const String &pathJson, String &outBody) {
+  String fullPath = pathJson + qAuth();
+  http.beginRequest();
+  http.get(fullPath.c_str());
+  http.endRequest();
+  int status = http.responseStatusCode();
+  outBody = http.responseBody();
+  return status >= 200 && status < 300;
+}
+
+bool httpDelete(const String &pathJson) {
+  String fullPath = pathJson + qAuth();
+  http.beginRequest();
+  http.del(fullPath.c_str());
+  http.endRequest();
+  int status = http.responseStatusCode();
+  String body = http.responseBody();
+  return status >= 200 && status < 300;
+}
+
+void publishHeartbeat() {
+  if (!netReady) return;
+  time_t nowEpoch = time(nullptr);
+  long lastSeen = (nowEpoch > 100000) ? (long)nowEpoch * 1000L : (long)millis();
+
+  String json = String("{\"active\":true,\"deviceType\":\"companion\",\"last_seen\":") + lastSeen + "}";
+  httpPutJson(pathDeviceRoot() + ".json", json);
 }
 
 bool currentLocation(double &lat, double &lng) {
-  // Feed incoming GPS bytes
   while (GPSSerial.available() > 0) {
     gps.encode(GPSSerial.read());
   }
-
   if (gps.location.isValid()) {
     lat = gps.location.lat();
     lng = gps.location.lng();
@@ -154,54 +195,55 @@ bool currentLocation(double &lat, double &lng) {
 }
 
 void publishLocationOnce() {
-  if (!firebaseReady) return;
-
+  if (!netReady) return;
   double lat, lng;
   if (!currentLocation(lat, lng)) {
     Serial.println(F("GPS location not ready"));
     return;
   }
-
-  // timestamp
   time_t nowEpoch = time(nullptr);
   long ts = (nowEpoch > 100000) ? (long)nowEpoch * 1000L : (long)millis();
 
-  FirebaseJson json;
-  json.set("latitude", lat);
-  json.set("longitude", lng);
-  json.set("timestamp", ts);
-
-  if (Firebase.RTDB.setJSON(&fbdo, pathVehicleLocation().c_str(), &json)) {
+  String json = String("{\"latitude\":") + String(lat, 6) + 
+                ",\"longitude\":" + String(lng, 6) +
+                ",\"timestamp\":" + ts + "}";
+  if (httpPutJson(pathVehicleRoot() + "/location.json", json)) {
     Serial.println(F("Location published"));
   } else {
-    Serial.printf("Location publish failed: %s\n", fbdo.errorReason().c_str());
+    Serial.println(F("Location publish failed"));
   }
 }
 
 void updateGeofenceStatus(double lat, double lng) {
-  if (!firebaseReady || !geofence.enabled) return;
-
+  if (!netReady || !geofence.enabled) return;
   double d = distanceMeters(lat, lng, geofence.centerLat, geofence.centerLng);
   bool isOutside = d > geofence.radiusMeters;
   String status = isOutside ? "outside" : "inside";
-
-  // Only write if changed to reduce writes
   if (isOutside != geofence.lastOutside) {
     geofence.lastOutside = isOutside;
-    Firebase.RTDB.setString(&fbdo, pathVehicleGeofenceStatus().c_str(), status);
+    String json = String("{\"status\":\"") + status + "\"}";
+    httpPutJson(pathVehicleRoot() + "/geofence.json", json);
     Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
-    // Optional audible alert on exit
     if (isOutside) toneBuzzer(150);
   }
+}
+
+void clearCommand() {
+  httpPutJson(pathCommands() + ".json", "\"\""); // write empty string
 }
 
 void onCommandReceived(const String &cmdRaw) {
   String cmd = cmdRaw;
   cmd.trim();
-  if (cmd.length() == 0) return;
+  if (cmd.length() == 0 || cmd == "\"\"") return;
+  // If quoted JSON string, strip quotes
+  if (cmd.startsWith("\"") && cmd.endsWith("\"")) {
+    cmd.remove(0, 1);
+    cmd.remove(cmd.length() - 1, 1);
+  }
+
   Serial.printf("Command received: %s\n", cmd.c_str());
 
-  // Parse known commands
   if (cmd == "TRACK") {
     publishLocationOnce();
   } else if (cmd == "START_TRACKING") {
@@ -220,10 +262,9 @@ void onCommandReceived(const String &cmdRaw) {
     pairedVehicleId = cmd.substring(5);
     pairedVehicleId.trim();
     Serial.printf("Paired vehicle id: %s\n", pairedVehicleId.c_str());
-    // Persist pairing info
-    Firebase.RTDB.setString(&fbdo, pathDeviceRoot() + "/pairedVehicleId", pairedVehicleId);
+    String json = String("{\"pairedVehicleId\":\"") + pairedVehicleId + "\"}";
+    httpPutJson(pathDeviceRoot() + ".json", json);
   } else if (cmd.startsWith("GEOFENCE_SET:")) {
-    // Format: GEOFENCE_SET:<lat>,<lng>,<radius>
     String args = cmd.substring(String("GEOFENCE_SET:").length());
     args.trim();
     int c1 = args.indexOf(',');
@@ -238,7 +279,7 @@ void onCommandReceived(const String &cmdRaw) {
       geofence.enabled = true;
       geofence.lastOutside = false;
       Serial.printf("Geofence set: lat=%.6f lng=%.6f r=%.2fm\n", geofence.centerLat, geofence.centerLng, geofence.radiusMeters);
-      Firebase.RTDB.setString(&fbdo, pathVehicleGeofenceStatus().c_str(), "inside");
+      httpPutJson(pathVehicleRoot() + "/geofence.json", "{\"status\":\"inside\"}");
     } else {
       Serial.println(F("Invalid GEOFENCE_SET format"));
     }
@@ -246,7 +287,7 @@ void onCommandReceived(const String &cmdRaw) {
     geofence.enabled = false;
     geofence.lastOutside = false;
     Serial.println(F("Geofence cleared"));
-    Firebase.RTDB.deleteNode(&fbdo, pathVehicleRoot() + "/geofence");
+    httpDelete(pathVehicleRoot() + "/geofence.json");
   } else if (cmd.startsWith("GEOFENCE_RADIUS:")) {
     String sRad = cmd.substring(String("GEOFENCE_RADIUS:").length());
     sRad.trim();
@@ -258,86 +299,47 @@ void onCommandReceived(const String &cmdRaw) {
     Serial.println(F("Unknown command"));
   }
 
-  // Clear the command after handling to acknowledge
-  if (!Firebase.RTDB.setString(&fbdo, pathCommands().c_str(), "")) {
-    Serial.printf("Failed to clear command: %s\n", fbdo.errorReason().c_str());
-  }
+  clearCommand();
 }
 
-void streamCallback(FirebaseStream data) {
-  if (data.dataTypeEnum() == fb_esp_rtdb_data_type_string) {
-    onCommandReceived(data.stringData());
-  } else if (data.dataTypeEnum() == fb_esp_rtdb_data_type_null) {
-    // No command
-  } else {
-    // If command is set by other type, fetch as string
-    String s;
-    if (Firebase.RTDB.getString(&fbdo, pathCommands().c_str())) {
-      s = fbdo.stringData();
-      onCommandReceived(s);
+void pollCommandsIfDue() {
+  const unsigned long nowMs = millis();
+  if (nowMs - lastCmdPollMs < CMD_POLL_INTERVAL_MS) return;
+  lastCmdPollMs = nowMs;
+
+  String body;
+  if (httpGet(pathCommands() + ".json", body)) {
+    // body is JSON value, expect string or null
+    if (body.length() > 0 && body != "null" && body != "\"\"") {
+      onCommandReceived(body);
     }
-  }
-}
-
-void streamTimeoutCallback(bool timeout) {
-  if (timeout) {
-    Serial.println(F("Stream timeout, resuming..."));
-  }
-}
-
-void ensureWifi() {
-  if (WiFi.status() == WL_CONNECTED) return;
-  isWifiConnected = false;
-
-  Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    delay(250);
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    isWifiConnected = true;
-    Serial.printf("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println(F("WiFi connect failed"));
-  }
-}
-
-void ensureFirebase() {
-  if (firebaseReady) return;
-  if (!isWifiConnected) return;
-
-  configFB.api_key = API_KEY;
-  configFB.database_url = DATABASE_URL;
-
-  // Anonymous auth is fine for device (ensure database rules allow device to write its own node)
-  if (Firebase.signUp(&configFB, &auth, "", "")) {
-    Serial.println(F("Firebase anonymous signUp ok"));
-  } else {
-    Serial.printf("Firebase signUp error: %s\n", configFB.signer.signupError.message.c_str());
-  }
-
-  Firebase.begin(&configFB, &auth);
-  Firebase.reconnectWiFi(true);
-
-  firebaseReady = true;
-
-  // Begin stream on commands/<DEVICE_ID>
-  if (Firebase.RTDB.beginStream(&fbdo, pathCommands().c_str())) {
-    Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
-    Serial.println(F("Firebase stream started"));
-  } else {
-    Serial.printf("Stream begin error: %s\n", fbdo.errorReason().c_str());
+    Serial.println(F("Command poll failed"));
   }
 }
 
 void setupTime() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+}
+
+void ensureModem() {
+  if (netReady) return;
+  Serial.println(F("Bringing up modem..."));
+  ModemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+
+  delay(600);
+  modem.restart();
+  // modem.init(); // alternative if restart is problematic
+
+  Serial.print(F("Connecting to APN: ")); Serial.println(GSM_APN);
+  if (!modem.gprsConnect(GSM_APN, GSM_USER, GSM_PASS)) {
+    Serial.println(F("GPRS connect failed"));
+    return;
+  }
+
+  netClient.setInsecure(); // skip certificate validation for simplicity
+  netReady = true;
+  Serial.println(F("GPRS connected and TLS client ready"));
 }
 
 void setup() {
@@ -352,18 +354,14 @@ void setup() {
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
   setupTime();
-
-  ensureWifi();
-  ensureFirebase();
+  ensureModem();
 
   // Mark device online initially
   publishHeartbeat();
 }
 
 void loop() {
-  // Maintain connections
-  ensureWifi();
-  ensureFirebase();
+  ensureModem();
 
   // Feed GPS continuously
   while (GPSSerial.available() > 0) {
@@ -377,6 +375,9 @@ void loop() {
     lastHeartbeatMs = nowMs;
     publishHeartbeat();
   }
+
+  // Commands polling
+  pollCommandsIfDue();
 
   // Tracking logic
   if (isTrackingContinuous && (nowMs - lastTrackPublishMs >= TRACK_INTERVAL_MS)) {
