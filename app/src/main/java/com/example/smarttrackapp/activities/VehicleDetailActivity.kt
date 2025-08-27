@@ -25,7 +25,6 @@ import com.example.smarttrackapp.utils.MapUtils
 import com.example.smarttrackapp.utils.SMSUtils
 import com.google.android.gms.location.*
 import kotlinx.coroutines.launch
-import android.media.MediaPlayer
 import android.os.Build
 import android.util.Log
 import android.view.View
@@ -67,10 +66,7 @@ class VehicleDetailActivity : AppCompatActivity() {
     private lateinit var locationCallback: LocationCallback
     private var isContinuousTracking = false
     private var geofenceRadiusMeters = 100.0
-    private var hasPlayedAlert = false
     private var isGeofenceEnabled = false
-    private var geofenceLat: Double? = null
-    private var geofenceLng: Double? = null
     private var locationListener: ValueEventListener? = null
     private var isFirebaseConnected = false
     private var lastFirebaseUpdateTime = 0L
@@ -108,9 +104,7 @@ class VehicleDetailActivity : AppCompatActivity() {
             permissions.getOrDefault(Manifest.permission.ACCESS_FINE_LOCATION, false) -> {
                 if (checkPermission(Manifest.permission.ACCESS_FINE_LOCATION)) {
                     startLocationUpdates()
-                    if (binding.switchGeofence.isChecked) {
-                        setupGeofence()
-                    }
+                    // Geofence is managed on DeviceTrackerCompanion; no local setup
                     currentVehicle.id.let { startLocationService(it) }
                 }
             }
@@ -452,10 +446,10 @@ class VehicleDetailActivity : AppCompatActivity() {
                 val radius = (progress + 10) // Range: 10 to 200 meters
                 geofenceRadiusMeters = radius.toDouble()
                 binding.geofenceRadiusValue.text = "$radius m"
-                binding.mapWebView.evaluateJavascript(
-                    "setGeofenceRadius($geofenceRadiusMeters);",
-                    null
-                )
+                // Send radius update to device companion
+                if (isGeofenceEnabled) {
+                    sendCommandToCompanion("GEOFENCE_RADIUS:${geofenceRadiusMeters.toInt()}")
+                }
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -470,89 +464,40 @@ class VehicleDetailActivity : AppCompatActivity() {
             isGeofenceEnabled = isChecked
             if (isChecked) {
                 if (checkLocationPermissions()) {
-                    setupGeofence()
+                    // Get current phone location and send geofence set command
+                    try {
+                        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                            if (location != null) {
+                                val lat = location.latitude
+                                val lng = location.longitude
+                                sendCommandToCompanion("GEOFENCE_SET:${"%.6f".format(lat)},${"%.6f".format(lng)},${geofenceRadiusMeters.toInt()}")
+                                Toast.makeText(this, "Geofence command sent to device", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(this, "Location unavailable", Toast.LENGTH_SHORT).show()
+                                binding.switchGeofence.isChecked = false
+                            }
+                        }.addOnFailureListener {
+                            Toast.makeText(this, "Failed to get location: ${it.message}", Toast.LENGTH_SHORT).show()
+                            binding.switchGeofence.isChecked = false
+                        }
+                    } catch (e: SecurityException) {
+                        Toast.makeText(this, "Location permission required", Toast.LENGTH_SHORT).show()
+                        binding.switchGeofence.isChecked = false
+                    }
                 } else {
                     binding.switchGeofence.isChecked = false
                     requestLocationPermissions()
                 }
             } else {
-                MapUtils.removeGeofenceCircle(binding.mapWebView)
+                // Clear geofence on device companion
+                sendCommandToCompanion("GEOFENCE_CLEAR")
                 binding.geofenceAlert.text = ""
             }
         }
     }
 
-    private fun setupGeofence() {
-        if (!checkPermission(Manifest.permission.ACCESS_FINE_LOCATION)) {
-            requestLocationPermissions()
-            return
-        }
-
-        try {
-            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                if (location != null) {
-                    geofenceLat = location.latitude
-                    geofenceLng = location.longitude
-                    MapUtils.drawGeofenceCircle(
-                        binding.mapWebView,
-                        geofenceLat!!,
-                        geofenceLng!!,
-                        geofenceRadiusMeters
-                    )
-                    // Immediately check and display geofence status
-                    try {
-                        lastLocation?.let { loc ->
-                            val results = FloatArray(1)
-                            Location.distanceBetween(
-                                geofenceLat!!, geofenceLng!!,
-                                loc.latitude, loc.longitude,
-                                results
-                            )
-                            val isOutside = results[0] > geofenceRadiusMeters
-                            val color = if (isOutside) "red" else "green"
-                            MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-                            if (isOutside) {
-                                val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                                Log.w(TAG, "Geofence alarm triggered (setup): $message")
-                                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                                binding.geofenceAlert.text = message
-                            } else {
-                                binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error in geofence setup check", e)
-                    }
-                    Toast.makeText(
-                        this,
-                        "Geofence set at current location",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    Toast.makeText(
-                        this,
-                        "Location is currently unavailable",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    binding.switchGeofence.isChecked = false
-                }
-            }.addOnFailureListener {
-                Toast.makeText(
-                    this,
-                    "Failed to get location: ${it.message}",
-                    Toast.LENGTH_SHORT
-                ).show()
-                binding.switchGeofence.isChecked = false
-            }
-        } catch (e: SecurityException) {
-            Toast.makeText(
-                this,
-                "Location permission required",
-                Toast.LENGTH_SHORT
-            ).show()
-            binding.switchGeofence.isChecked = false
-        }
-    }
+    // Local geofence setup removed; handled by DeviceTrackerCompanion via commands
+    private fun setupGeofence() { }
 
     // The following function is now disabled. Tracking is handled by DeviceTrackerCompanion.
     private fun startLocationService(vehicleId: Long) {
@@ -661,33 +606,8 @@ class VehicleDetailActivity : AppCompatActivity() {
             throttledMapUpdate {
             binding.lastLocation.text = "Lat: ${"%.6f".format(lat)}, Lng: ${"%.6f".format(lng)}"
 
-            // Check geofence status
-            try {
-                if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
-                val results = FloatArray(1)
-                    Location.distanceBetween(geofenceLat!!, geofenceLng!!, lat, lng, results)
-                    val isOutside = results[0] > geofenceRadiusMeters
-                    val color = if (isOutside) "red" else "green"
-                    MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-                    if (isOutside && !hasPlayedAlert) {
-                        val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                        Log.w(TAG, "Geofence alarm triggered: $message")
-                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                    sendSMSWithPermissionCheck(currentVehicle.phoneNumber, message)
-                    binding.geofenceAlert.text = message
-                        val mediaPlayer = MediaPlayer.create(this, R.raw.alert_buzzer)
-                        mediaPlayer.start()
-                        hasPlayedAlert = true
-                    } else if (!isOutside) {
-                        binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                        hasPlayedAlert = false
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in geofence check", e)
-            }
-
-            val isInsideGeofence = isInsideGeofence(lat, lng)
+            // Geofence checks handled by device companion; simply update marker
+            val isInsideGeofence = true
             MapUtils.updateMapLocationDebounced(
                 binding.mapWebView,
                 lat,
@@ -716,19 +636,8 @@ class VehicleDetailActivity : AppCompatActivity() {
     }
 
     private fun isInsideGeofence(currentLat: Double, currentLng: Double): Boolean {
-        if (!isGeofenceEnabled || geofenceLat == null || geofenceLng == null) return true
-
-        return try {
-            val results = FloatArray(1)
-            Location.distanceBetween(
-                geofenceLat!!, geofenceLng!!,
-                currentLat, currentLng,
-                results
-            )
-            results[0] <= geofenceRadiusMeters
-        } catch (e: SecurityException) {
-            true
-        }
+        // Geofence status is determined on the companion device
+        return true
     }
 
     private fun checkPermission(permission: String): Boolean {
