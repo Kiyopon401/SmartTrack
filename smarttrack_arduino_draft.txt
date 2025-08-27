@@ -46,7 +46,7 @@
 
 // Firebase RTDB REST host (no protocol, no trailing slash)
 // Example: "your-project-id-default-rtdb.asia-southeast1.firebasedatabase.app"
-#define DATABASE_HOST    "YOUR_DATABASE_HOST"
+#define DATABASE_HOST    "smarttrackbackup-d19e8-default-rtdb.asia-southeast1.firebasedatabase.app"
 
 // Optional database secret or auth token. If empty, no auth query is appended.
 // Prefer using a scoped custom token or rules restricted to 
