@@ -12,6 +12,10 @@ import com.example.smarttrackapp.di.ViewModelFactory
 import com.example.smarttrackapp.App
 import com.example.smarttrackapp.utils.FirebaseManager
 import android.view.View
+import android.text.Editable
+import android.text.TextWatcher
+import androidx.core.content.ContextCompat
+import com.example.smarttrackapp.R
 
 class RegisterVehicleActivity : AppCompatActivity() {
     private lateinit var binding: ActivityRegisterVehicleBinding
@@ -28,6 +32,7 @@ class RegisterVehicleActivity : AppCompatActivity() {
         setContentView(binding.root)
         FirebaseManager.initialize(this)
         setupClickListeners()
+        setupLivePairingCheck()
     }
 
     private fun setupClickListeners() {
@@ -76,6 +81,34 @@ class RegisterVehicleActivity : AppCompatActivity() {
         binding.btnCancel.setOnClickListener {
             finish()
         }
+    }
+
+    private fun setupLivePairingCheck() {
+        binding.etPhoneNumber.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val number = s?.toString()?.trim() ?: ""
+                if (number.length < 6) {
+                    binding.tvPairStatus.visibility = View.GONE
+                    return
+                }
+                binding.tvPairStatus.visibility = View.VISIBLE
+                binding.tvPairStatus.text = "Checking…"
+                binding.tvPairStatus.setTextColor(ContextCompat.getColor(this@RegisterVehicleActivity, R.color.orange))
+                FirebaseManager.findDeviceByMsisdn(number) { deviceIdOrNull ->
+                    runOnUiThread {
+                        if (deviceIdOrNull.isNullOrEmpty()) {
+                            binding.tvPairStatus.text = "No tracker found yet"
+                            binding.tvPairStatus.setTextColor(ContextCompat.getColor(this@RegisterVehicleActivity, R.color.orange))
+                        } else {
+                            binding.tvPairStatus.text = "Tracker found: ${deviceIdOrNull}"
+                            binding.tvPairStatus.setTextColor(ContextCompat.getColor(this@RegisterVehicleActivity, R.color.green))
+                        }
+                    }
+                }
+            }
+        })
     }
 
     override fun onDestroy() {
