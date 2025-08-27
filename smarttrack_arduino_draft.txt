@@ -1,0 +1,397 @@
+// SmartTrack DeviceTrackerCompanion (ESP32) - Arduino IDE Draft
+//
+// Features:
+// - WiFi + Firebase RTDB connection (mobizt Firebase ESP Client library)
+// - GPS read (TinyGPS++) and location publish to /vehicles/<DEVICE_ID>/location
+// - Command listener at /commands/<DEVICE_ID>
+// - Commands supported:
+//     TRACK                               -> publish one location update
+//     START_TRACKING                       -> start continuous location publish
+//     STOP                                 -> stop continuous tracking
+//     IMMOBILIZE                           -> activate relay (kill switch)
+//     UNLOCK                               -> deactivate relay
+//     PAIR:<VEHICLE_DB_ID>                 -> associate this device with a vehicle ID
+//     GEOFENCE_SET:<lat>,<lng>,<radius_m>  -> enable geofence at center with radius
+//     GEOFENCE_CLEAR                       -> disable geofence
+//     GEOFENCE_RADIUS:<radius_m>           -> update radius while enabled
+// - Geofence detection and status publish to /vehicles/<DEVICE_ID>/geofence/status
+// - Heartbeat updates to /devices/<DEVICE_ID> (active, last_seen, deviceType)
+//
+// Hardware assumptions:
+// - Board: ESP32
+// - GPS module on Serial1 (RX=16, TX=17 by default here; adjust for your wiring)
+// - Immobilizer relay on GPIO 4 (active HIGH by default; change as needed)
+// - Optional buzzer on GPIO 5
+//
+// Arduino Library dependencies:
+// - Firebase ESP Client by mobizt (Tools -> Manage Libraries)
+// - TinyGPS++ by Mikal Hart
+//
+// Fill in the WIFI and Firebase credentials in the CONFIG section below.
+
+#include <WiFi.h>
+#include <TinyGPSPlus.h>
+#include <HardwareSerial.h>
+#include <Firebase_ESP_Client.h>
+#include <time.h>
+
+// Provide the token generation process info.
+#include "addons/TokenHelper.h"
+// Provide the RTDB payload printing helper
+#include "addons/RTDBHelper.h"
+
+// =========================
+// ====== CONFIG AREA ======
+// =========================
+#define WIFI_SSID        "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD    "YOUR_WIFI_PASSWORD"
+
+// Firebase
+#define API_KEY          "YOUR_FIREBASE_WEB_API_KEY"
+#define DATABASE_URL     "https://YOUR_PROJECT_ID-default-rtdb.REGION.firebasedatabase.app"  // e.g., https://myapp-default-rtdb.firebaseio.com
+
+// Device identity (MUST be unique and registered in your RTDB "devices" tree)
+#define DEVICE_ID        "YOUR_DEVICE_ID"
+
+// Default GPS serial pins and baud for ESP32 (adjust to match your GPS module)
+#define GPS_RX_PIN       16   // GPS TX -> ESP32 RX (GPIO16)
+#define GPS_TX_PIN       17   // GPS RX -> ESP32 TX (GPIO17)
+#define GPS_BAUD         9600
+
+// IO pins
+#define RELAY_PIN        4
+#define BUZZER_PIN       5
+
+// Tracking settings
+static const unsigned long TRACK_INTERVAL_MS = 10UL * 1000UL;  // 10s continuous tracking interval
+static const unsigned long HEARTBEAT_INTERVAL_MS = 10UL * 1000UL;  // heartbeat frequency
+
+// =========================
+// ====== GLOBALS ==========
+// =========================
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig configFB;
+
+TinyGPSPlus gps;
+HardwareSerial GPSSerial(1);
+
+bool isWifiConnected = false;
+bool firebaseReady = false;
+bool isTrackingContinuous = false;
+
+String pairedVehicleId = "";  // loaded via PAIR command
+
+struct Geofence {
+  bool enabled = false;
+  double centerLat = 0.0;
+  double centerLng = 0.0;
+  double radiusMeters = 0.0;
+  bool lastOutside = false;  // to detect transitions
+} geofence;
+
+unsigned long lastTrackPublishMs = 0;
+unsigned long lastHeartbeatMs = 0;
+
+// =========================
+// ====== HELPERS ==========
+// =========================
+static double degreesToRadians(double deg) { return deg * 3.14159265358979323846 / 180.0; }
+
+static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+  // Haversine
+  const double R = 6371000.0; // meters
+  double dLat = degreesToRadians(lat2 - lat1);
+  double dLon = degreesToRadians(lon2 - lon1);
+  double a = sin(dLat / 2) * sin(dLat / 2) +
+             cos(degreesToRadians(lat1)) * cos(degreesToRadians(lat2)) *
+             sin(dLon / 2) * sin(dLon / 2);
+  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return R * c;
+}
+
+static String rtdbPath(const String &p) { return String(p); }
+static String pathCommands() { return String("/commands/") + DEVICE_ID; }
+static String pathVehicleRoot() { return String("/vehicles/") + DEVICE_ID; }
+static String pathVehicleLocation() { return pathVehicleRoot() + "/location"; }
+static String pathVehicleGeofenceStatus() { return pathVehicleRoot() + "/geofence/status"; }
+static String pathDeviceRoot() { return String("/devices/") + DEVICE_ID; }
+
+void toneBuzzer(unsigned long ms) {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(ms);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void setImmobilized(bool enable) {
+  digitalWrite(RELAY_PIN, enable ? HIGH : LOW);
+}
+
+void publishHeartbeat() {
+  if (!firebaseReady) return;
+  const unsigned long nowMs = millis();
+  // Use epoch time if available, else millis
+  time_t nowEpoch = time(nullptr);
+  long lastSeen = nowEpoch > 100000 ? (long)nowEpoch * 1000L : (long)nowMs; // ms
+
+  Firebase.RTDB.setBool(&fbdo, pathDeviceRoot() + "/active", true);
+  Firebase.RTDB.setString(&fbdo, pathDeviceRoot() + "/deviceType", "companion");
+  Firebase.RTDB.setInt(&fbdo, pathDeviceRoot() + "/last_seen", lastSeen);
+}
+
+bool currentLocation(double &lat, double &lng) {
+  // Feed incoming GPS bytes
+  while (GPSSerial.available() > 0) {
+    gps.encode(GPSSerial.read());
+  }
+
+  if (gps.location.isValid()) {
+    lat = gps.location.lat();
+    lng = gps.location.lng();
+    return true;
+  }
+  return false;
+}
+
+void publishLocationOnce() {
+  if (!firebaseReady) return;
+
+  double lat, lng;
+  if (!currentLocation(lat, lng)) {
+    Serial.println(F("GPS location not ready"));
+    return;
+  }
+
+  // timestamp
+  time_t nowEpoch = time(nullptr);
+  long ts = (nowEpoch > 100000) ? (long)nowEpoch * 1000L : (long)millis();
+
+  FirebaseJson json;
+  json.set("latitude", lat);
+  json.set("longitude", lng);
+  json.set("timestamp", ts);
+
+  if (Firebase.RTDB.setJSON(&fbdo, pathVehicleLocation().c_str(), &json)) {
+    Serial.println(F("Location published"));
+  } else {
+    Serial.printf("Location publish failed: %s\n", fbdo.errorReason().c_str());
+  }
+}
+
+void updateGeofenceStatus(double lat, double lng) {
+  if (!firebaseReady || !geofence.enabled) return;
+
+  double d = distanceMeters(lat, lng, geofence.centerLat, geofence.centerLng);
+  bool isOutside = d > geofence.radiusMeters;
+  String status = isOutside ? "outside" : "inside";
+
+  // Only write if changed to reduce writes
+  if (isOutside != geofence.lastOutside) {
+    geofence.lastOutside = isOutside;
+    Firebase.RTDB.setString(&fbdo, pathVehicleGeofenceStatus().c_str(), status);
+    Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
+    // Optional audible alert on exit
+    if (isOutside) toneBuzzer(150);
+  }
+}
+
+void onCommandReceived(const String &cmdRaw) {
+  String cmd = cmdRaw;
+  cmd.trim();
+  if (cmd.length() == 0) return;
+  Serial.printf("Command received: %s\n", cmd.c_str());
+
+  // Parse known commands
+  if (cmd == "TRACK") {
+    publishLocationOnce();
+  } else if (cmd == "START_TRACKING") {
+    isTrackingContinuous = true;
+    Serial.println(F("Continuous tracking enabled"));
+  } else if (cmd == "STOP") {
+    isTrackingContinuous = false;
+    Serial.println(F("Tracking stopped"));
+  } else if (cmd == "IMMOBILIZE") {
+    setImmobilized(true);
+    Serial.println(F("Immobilizer engaged"));
+  } else if (cmd == "UNLOCK") {
+    setImmobilized(false);
+    Serial.println(F("Immobilizer disengaged"));
+  } else if (cmd.startsWith("PAIR:")) {
+    pairedVehicleId = cmd.substring(5);
+    pairedVehicleId.trim();
+    Serial.printf("Paired vehicle id: %s\n", pairedVehicleId.c_str());
+    // Persist pairing info
+    Firebase.RTDB.setString(&fbdo, pathDeviceRoot() + "/pairedVehicleId", pairedVehicleId);
+  } else if (cmd.startsWith("GEOFENCE_SET:")) {
+    // Format: GEOFENCE_SET:<lat>,<lng>,<radius>
+    String args = cmd.substring(String("GEOFENCE_SET:").length());
+    args.trim();
+    int c1 = args.indexOf(',');
+    int c2 = args.indexOf(',', c1 + 1);
+    if (c1 > 0 && c2 > c1) {
+      String sLat = args.substring(0, c1);
+      String sLng = args.substring(c1 + 1, c2);
+      String sRad = args.substring(c2 + 1);
+      geofence.centerLat = sLat.toDouble();
+      geofence.centerLng = sLng.toDouble();
+      geofence.radiusMeters = sRad.toDouble();
+      geofence.enabled = true;
+      geofence.lastOutside = false;
+      Serial.printf("Geofence set: lat=%.6f lng=%.6f r=%.2fm\n", geofence.centerLat, geofence.centerLng, geofence.radiusMeters);
+      Firebase.RTDB.setString(&fbdo, pathVehicleGeofenceStatus().c_str(), "inside");
+    } else {
+      Serial.println(F("Invalid GEOFENCE_SET format"));
+    }
+  } else if (cmd == "GEOFENCE_CLEAR") {
+    geofence.enabled = false;
+    geofence.lastOutside = false;
+    Serial.println(F("Geofence cleared"));
+    Firebase.RTDB.deleteNode(&fbdo, pathVehicleRoot() + "/geofence");
+  } else if (cmd.startsWith("GEOFENCE_RADIUS:")) {
+    String sRad = cmd.substring(String("GEOFENCE_RADIUS:").length());
+    sRad.trim();
+    if (geofence.enabled) {
+      geofence.radiusMeters = sRad.toDouble();
+      Serial.printf("Geofence radius updated: %.2fm\n", geofence.radiusMeters);
+    }
+  } else {
+    Serial.println(F("Unknown command"));
+  }
+
+  // Clear the command after handling to acknowledge
+  if (!Firebase.RTDB.setString(&fbdo, pathCommands().c_str(), "")) {
+    Serial.printf("Failed to clear command: %s\n", fbdo.errorReason().c_str());
+  }
+}
+
+void streamCallback(FirebaseStream data) {
+  if (data.dataTypeEnum() == fb_esp_rtdb_data_type_string) {
+    onCommandReceived(data.stringData());
+  } else if (data.dataTypeEnum() == fb_esp_rtdb_data_type_null) {
+    // No command
+  } else {
+    // If command is set by other type, fetch as string
+    String s;
+    if (Firebase.RTDB.getString(&fbdo, pathCommands().c_str())) {
+      s = fbdo.stringData();
+      onCommandReceived(s);
+    }
+  }
+}
+
+void streamTimeoutCallback(bool timeout) {
+  if (timeout) {
+    Serial.println(F("Stream timeout, resuming..."));
+  }
+}
+
+void ensureWifi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  isWifiConnected = false;
+
+  Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    isWifiConnected = true;
+    Serial.printf("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println(F("WiFi connect failed"));
+  }
+}
+
+void ensureFirebase() {
+  if (firebaseReady) return;
+  if (!isWifiConnected) return;
+
+  configFB.api_key = API_KEY;
+  configFB.database_url = DATABASE_URL;
+
+  // Anonymous auth is fine for device (ensure database rules allow device to write its own node)
+  if (Firebase.signUp(&configFB, &auth, "", "")) {
+    Serial.println(F("Firebase anonymous signUp ok"));
+  } else {
+    Serial.printf("Firebase signUp error: %s\n", configFB.signer.signupError.message.c_str());
+  }
+
+  Firebase.begin(&configFB, &auth);
+  Firebase.reconnectWiFi(true);
+
+  firebaseReady = true;
+
+  // Begin stream on commands/<DEVICE_ID>
+  if (Firebase.RTDB.beginStream(&fbdo, pathCommands().c_str())) {
+    Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
+    Serial.println(F("Firebase stream started"));
+  } else {
+    Serial.printf("Stream begin error: %s\n", fbdo.errorReason().c_str());
+  }
+}
+
+void setupTime() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  setImmobilized(false);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+
+  setupTime();
+
+  ensureWifi();
+  ensureFirebase();
+
+  // Mark device online initially
+  publishHeartbeat();
+}
+
+void loop() {
+  // Maintain connections
+  ensureWifi();
+  ensureFirebase();
+
+  // Feed GPS continuously
+  while (GPSSerial.available() > 0) {
+    gps.encode(GPSSerial.read());
+  }
+
+  const unsigned long nowMs = millis();
+
+  // Heartbeat
+  if (nowMs - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMs = nowMs;
+    publishHeartbeat();
+  }
+
+  // Tracking logic
+  if (isTrackingContinuous && (nowMs - lastTrackPublishMs >= TRACK_INTERVAL_MS)) {
+    lastTrackPublishMs = nowMs;
+    publishLocationOnce();
+  }
+
+  // Geofence check on any fresh GPS fix
+  if (gps.location.isUpdated()) {
+    double lat = gps.location.lat();
+    double lng = gps.location.lng();
+    updateGeofenceStatus(lat, lng);
+  }
+
+  delay(20);
+}
+
+// END OF FILE
