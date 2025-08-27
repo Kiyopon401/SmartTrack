@@ -171,19 +171,31 @@ object FirebaseManager {
     fun findDeviceByMsisdn(msisdnRaw: String, callback: (String?) -> Unit) {
         checkInitialized()
         val msisdn = normalizePhone(msisdnRaw)
+        Log.d("FirebaseManager", "Searching for MSISDN: $msisdn")
         db.reference.child("devices").addListenerForSingleValueEvent(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
+                Log.d("FirebaseManager", "Scanning ${snapshot.childrenCount} devices for MSISDN match")
                 for (child in snapshot.children) {
                     val deviceId = child.key ?: continue
+                    Log.d("FirebaseManager", "Checking device: $deviceId")
                     val simNode = child.child("sim")
+                    if (!simNode.exists()) {
+                        Log.d("FirebaseManager", "Device $deviceId has no sim node")
+                        continue
+                    }
                     val simMsisdn = simNode.child("simMsisdn").getValue(String::class.java)
+                    Log.d("FirebaseManager", "Device $deviceId simMsisdn: $simMsisdn")
                     if (!simMsisdn.isNullOrBlank()) {
-                        if (normalizePhone(simMsisdn) == msisdn) {
+                        val normalizedSimMsisdn = normalizePhone(simMsisdn)
+                        Log.d("FirebaseManager", "Comparing: '$normalizedSimMsisdn' == '$msisdn'")
+                        if (normalizedSimMsisdn == msisdn) {
+                            Log.d("FirebaseManager", "MSISDN match found: $deviceId")
                             callback(deviceId)
                             return
                         }
                     }
                 }
+                Log.d("FirebaseManager", "No MSISDN match found")
                 callback(null)
             }
 
