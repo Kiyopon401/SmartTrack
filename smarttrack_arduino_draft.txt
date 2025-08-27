@@ -89,6 +89,9 @@ bool netReady = false;
 bool isTrackingContinuous = false;
 
 String pairedVehicleId = "";  // loaded via PAIR command
+String simMsisdn = "";         // SIM phone number (if available)
+String simIccid  = "";         // SIM ICCID
+String deviceImei = "";        // Modem IMEI
 
 struct Geofence {
   bool enabled = false;
@@ -180,6 +183,16 @@ void publishHeartbeat() {
 
   String json = String("{\"active\":true,\"deviceType\":\"companion\",\"last_seen\":") + lastSeen + "}";
   httpPutJson(pathDeviceRoot() + ".json", json);
+}
+
+void publishSimIdentity() {
+  if (!netReady) return;
+  String json = String("{") +
+                "\"simMsisdn\":\"" + simMsisdn + "\"," +
+                "\"simIccid\":\"" + simIccid + "\"," +
+                "\"imei\":\"" + deviceImei + "\"" +
+                "}";
+  httpPutJson(pathDeviceRoot() + "/sim.json", json);
 }
 
 bool currentLocation(double &lat, double &lng) {
@@ -340,6 +353,32 @@ void ensureModem() {
   netClient.setInsecure(); // skip certificate validation for simplicity
   netReady = true;
   Serial.println(F("GPRS connected and TLS client ready"));
+
+  // Fetch SIM/Device identity for registration
+  deviceImei = modem.getIMEI();
+  simIccid = modem.getSimCCID();
+  // Try to read MSISDN via AT+CNUM (not guaranteed)
+  simMsisdn = "";
+  modem.sendAT("+CNUM");
+  if (modem.waitResponse(1000L, simMsisdn) == 1) {
+    int p1 = simMsisdn.indexOf('"');
+    if (p1 >= 0) {
+      int p2 = simMsisdn.indexOf('"', p1 + 1);
+      if (p2 > p1) {
+        int p3 = simMsisdn.indexOf('"', p2 + 1);
+        int p4 = simMsisdn.indexOf('"', p3 + 1);
+        if (p3 >= 0 && p4 > p3) {
+          String msisdn = simMsisdn.substring(p3 + 1, p4);
+          msisdn.trim();
+          if (msisdn.length() > 0) simMsisdn = msisdn; else simMsisdn = "";
+        } else {
+          simMsisdn = "";
+        }
+      }
+    }
+  } else {
+    simMsisdn = "";
+  }
 }
 
 void setup() {
@@ -358,6 +397,8 @@ void setup() {
 
   // Mark device online initially
   publishHeartbeat();
+  // Publish SIM/Device identity for registration
+  publishSimIdentity();
 }
 
 void loop() {
