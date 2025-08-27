@@ -70,6 +70,7 @@ dependencies {
     implementation("com.google.firebase:firebase-analytics-ktx")
     implementation("com.google.firebase:firebase-common-ktx:20.4.2")
     implementation("com.google.firebase:firebase-core:21.1.1")
+    implementation("com.google.firebase:firebase-messaging-ktx")
 
     // Room Database
     implementation("androidx.room:room-runtime:2.6.1")

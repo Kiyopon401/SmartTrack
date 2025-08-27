@@ -42,6 +42,7 @@ import com.google.firebase.ktx.Firebase
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import android.app.AlertDialog
+import com.example.smarttrackapp.services.SmarttrackMessagingService
 
 
 class VehicleDetailActivity : AppCompatActivity() {
@@ -167,6 +168,11 @@ class VehicleDetailActivity : AppCompatActivity() {
         } else {
             requestLocationPermissions()
         }
+
+        // Subscribe to geofence topic for background alerts
+        try {
+            SmarttrackMessagingService.subscribeToDeviceTopic(currentVehicle.deviceId)
+        } catch (_: Exception) {}
     }
 
     private fun setupObservers(vehicleId: Long) {
