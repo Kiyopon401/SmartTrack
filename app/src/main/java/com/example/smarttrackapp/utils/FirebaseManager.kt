@@ -123,7 +123,11 @@ object FirebaseManager {
                 for (child in snapshot.children) {
                     child.key?.let { deviceId ->
                         // Add companion devices (deviceType = "companion")
-                        val deviceType = child.child("deviceType").getValue(String::class.java)
+                        val deviceTypeRaw = child.child("deviceType").getValue()
+                        val deviceType = when (deviceTypeRaw) {
+                            is String -> deviceTypeRaw
+                            else -> deviceTypeRaw?.toString() ?: ""
+                        }
                         val isActive = child.child("active").getValue(Boolean::class.java) ?: false
                         Log.d("FirebaseManager", "Device $deviceId: type=$deviceType, active=$isActive")
                         

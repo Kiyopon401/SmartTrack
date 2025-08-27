@@ -278,7 +278,11 @@ class VehicleDetailActivity : AppCompatActivity() {
                             binding.geofenceAlert.text = ""
                             return
                         }
-                        val status = snapshot.child("status").getValue(String::class.java)
+                        val statusRaw = snapshot.child("status").getValue()
+                        val status = when (statusRaw) {
+                            is String -> statusRaw
+                            else -> statusRaw?.toString() ?: "inside"
+                        }
                         val centerLat = snapshot.child("center").child("lat").getValue(Double::class.java)
                         val centerLng = snapshot.child("center").child("lng").getValue(Double::class.java)
                         val radius = snapshot.child("radius").getValue(Double::class.java)
