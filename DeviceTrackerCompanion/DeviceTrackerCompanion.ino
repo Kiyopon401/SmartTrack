@@ -145,6 +145,7 @@ void setImmobilized(bool enable) {
 bool httpPutJson(const String &pathJson, const String &json) {
   if (!http) return false;
   String fullPath = pathJson + qAuth();
+  Serial.printf("HTTP PUT https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
   http->beginRequest();
   http->put(fullPath.c_str());
   http->sendHeader("Content-Type", "application/json");
@@ -155,28 +156,33 @@ bool httpPutJson(const String &pathJson, const String &json) {
   int status = http->responseStatusCode();
   // Consume response
   String body = http->responseBody();
+  Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
   return status >= 200 && status < 300;
 }
 
 bool httpGet(const String &pathJson, String &outBody) {
   if (!http) return false;
   String fullPath = pathJson + qAuth();
+  Serial.printf("HTTP GET https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
   http->beginRequest();
   http->get(fullPath.c_str());
   http->endRequest();
   int status = http->responseStatusCode();
   outBody = http->responseBody();
+  Serial.printf("-> Status: %d, Body: %s\n", status, outBody.c_str());
   return status >= 200 && status < 300;
 }
 
 bool httpDelete(const String &pathJson) {
   if (!http) return false;
   String fullPath = pathJson + qAuth();
+  Serial.printf("HTTP DELETE https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
   http->beginRequest();
   http->del(fullPath.c_str());
   http->endRequest();
   int status = http->responseStatusCode();
   String body = http->responseBody();
+  Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
   return status >= 200 && status < 300;
 }
 
@@ -617,6 +623,13 @@ void setup() {
   ensureNetwork();
   delay(1000);
   if (netReady) {
+    // Probe Firebase connectivity: get current device node
+    String probe;
+    bool ok = httpGet(pathDeviceRoot() + ".json", probe);
+    Serial.printf("Connectivity probe %s.\n", ok ? "OK" : "FAILED");
+    if (!ok) {
+      Serial.println(F("If unauthorized, set DATABASE_AUTH or relax RTDB rules for testing."));
+    }
     publishHeartbeat();
     publishSimIdentity();
   }
