@@ -148,6 +148,7 @@ bool httpPutJson(const String &pathJson, const String &json) {
   Serial.printf("HTTP PUT https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
   http->beginRequest();
   http->put(fullPath.c_str());
+  http->sendHeader("Connection", "close");
   http->sendHeader("Content-Type", "application/json");
   http->sendHeader("Content-Length", json.length());
   http->beginBody();
@@ -166,6 +167,7 @@ bool httpGet(const String &pathJson, String &outBody) {
   Serial.printf("HTTP GET https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
   http->beginRequest();
   http->get(fullPath.c_str());
+  http->sendHeader("Connection", "close");
   http->endRequest();
   int status = http->responseStatusCode();
   outBody = http->responseBody();
@@ -179,6 +181,7 @@ bool httpDelete(const String &pathJson) {
   Serial.printf("HTTP DELETE https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
   http->beginRequest();
   http->del(fullPath.c_str());
+  http->sendHeader("Connection", "close");
   http->endRequest();
   int status = http->responseStatusCode();
   String body = http->responseBody();
@@ -398,8 +401,10 @@ bool connectWiFi() {
     Serial.print(F("WiFi connected! IP: "));
     Serial.println(WiFi.localIP());
     wifiClient.setInsecure();
+    wifiClient.setTimeout(15000);
     netClient = &wifiClient;
     http = new HttpClient(*netClient, DATABASE_HOST, 443);
+    http->setHttpResponseTimeout(8000);
     return true;
   } else {
     Serial.println();
@@ -560,6 +565,7 @@ bool connectCellular() {
   Serial.println(F("GPRS connected and TLS client ready"));
   netClient = &gsmClient;
   http = new HttpClient(*netClient, DATABASE_HOST, 443);
+  http->setHttpResponseTimeout(8000);
   return true;
 }
 
