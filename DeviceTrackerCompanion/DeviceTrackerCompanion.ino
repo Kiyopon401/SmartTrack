@@ -61,7 +61,7 @@
 
 // Timings
 static const unsigned long TRACK_INTERVAL_MS = 10UL * 1000UL;     // 10s continuous tracking interval
-static const unsigned long HEARTBEAT_INTERVAL_MS = 10UL * 1000UL; // heartbeat frequency
+static const unsigned long HEARTBEAT_INTERVAL_MS = 5UL * 1000UL; // heartbeat frequency
 static const unsigned long CMD_POLL_INTERVAL_MS = 3UL * 1000UL;   // poll commands every 3s
 
 // =========================
@@ -223,7 +223,8 @@ String buildDeviceSnapshotJson(long lastSeen) {
 void publishHeartbeat() {
   if (!netReady) return;
   time_t nowEpoch = time(nullptr);
-  long lastSeen = (nowEpoch > 100000) ? (long)nowEpoch * 1000L : (long)millis();
+  // Use unsigned long long to avoid negative wrap and keep ms precision
+  unsigned long long lastSeen = (nowEpoch > 100000) ? (unsigned long long)nowEpoch * 1000ULL : (unsigned long long)millis();
   String json = buildDeviceSnapshotJson(lastSeen);
   bool ok = httpPutJson(pathDeviceRoot() + ".json", json);
   if (ok) {
@@ -424,6 +425,9 @@ bool connectWiFi() {
   if (wifiConnected) return true;
   Serial.print(F("Connecting to WiFi: "));
   Serial.println(WIFI_SSID);
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < WIFI_TIMEOUT_MS) {
@@ -435,6 +439,7 @@ bool connectWiFi() {
     Serial.println();
     Serial.print(F("WiFi connected! IP: "));
     Serial.println(WiFi.localIP());
+    WiFi.setAutoReconnect(true);
     wifiClient.setInsecure();
     wifiClient.setTimeout(15000);
     netClient = &wifiClient;
