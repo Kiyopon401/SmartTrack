@@ -244,6 +244,12 @@ object MapUtils {
         webView.post { webView.evaluateJavascript("clearGeofence();", null) }
     }
 
+    fun updateGeofenceRadius(webView: WebView, radius: Double) {
+        webView.post {
+            webView.evaluateJavascript("setGeofenceRadius($radius);", null)
+        }
+    }
+
     fun loadHtmlFromRaw(webView: WebView, rawResourceId: Int) {
         val inputStream = webView.context.resources.openRawResource(rawResourceId)
         val htmlString = inputStream.bufferedReader().use { it.readText() }

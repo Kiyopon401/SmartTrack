@@ -42,8 +42,9 @@
                 geofenceCircle.setStyle({
                   color: isInside ? "green" : "red",
                   fillColor: isInside ? "#00ff00" : "#ff0000",
-                  fillOpacity: 0.3,
-                  weight: 3
+                  fillOpacity: 0.2,
+                  weight: 4,
+                  dashArray: "10, 10"
                 });
               }
 
@@ -75,14 +76,19 @@
               }
             }
 
+            function removeGeofenceCircle() {
+              clearGeofence();
+            }
+
             function drawGeofenceCircle(lat, lng, color = "green") {
               clearGeofence();
               geofenceCircle = L.circle([lat, lng], {
                 color: color,
                 fillColor: color === "red" ? "#ff0000" : "#00ff00",
-                fillOpacity: 0.3,
-                weight: 3,
+                fillOpacity: 0.2,
+                weight: 4,
                 radius: geofenceRadius,
+                dashArray: "10, 10"
               }).addTo(map);
               
               // Ensure the geofence circle is visible by fitting bounds
