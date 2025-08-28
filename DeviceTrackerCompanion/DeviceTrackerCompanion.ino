@@ -44,8 +44,8 @@
 #define DEVICE_ID        "tracker_01"
 
 // GPS serial pins for GPS6MV2 (adjust to match your GPS module)
-#define GPS_RX_PIN       15   // GPS TX -> ESP32 RX (GPIO15) - Serial2
-#define GPS_TX_PIN       18   // GPS RX -> ESP32 TX (GPIO18) - avoid GPIO2 due to boot strap
+#define GPS_RX_PIN       27   // GPS TX -> ESP32 RX (GPIO27) - safe pin
+#define GPS_TX_PIN       26   // GPS RX -> ESP32 TX (GPIO26) - safe pin
 #define GPS_BAUD         9600
 
 // WARNING: GPIO 2 has built-in LED and can cause GPS communication issues
