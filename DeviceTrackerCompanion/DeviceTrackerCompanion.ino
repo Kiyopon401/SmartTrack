@@ -154,12 +154,26 @@ bool httpPutJson(const String &pathJson, const String &json) {
   http->beginBody();
   http->print(json);
   http->endRequest();
-  int status = http->responseStatusCode();
-  // Consume response
-  String body = http->responseBody();
-  Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
-  http->stop();
-  return status >= 200 && status < 300;
+  // Try to read a quick response, but don't block long (avoid WDT resets)
+  unsigned long t0 = millis();
+  int status = -1;
+  while (millis() - t0 < 1200) {
+    if (netClient && netClient->available()) {
+      status = http->responseStatusCode();
+      break;
+    }
+    delay(10);
+  }
+  if (status == -1) {
+    Serial.println(F("-> No immediate response (fire-and-forget)."));
+    http->stop();
+    return true; // assume success; Firebase typically processes the PUT
+  } else {
+    String body = http->responseBody();
+    Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
+    http->stop();
+    return status >= 200 && status < 300;
+  }
 }
 
 bool httpGet(const String &pathJson, String &outBody) {
