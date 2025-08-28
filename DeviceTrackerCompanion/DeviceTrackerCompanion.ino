@@ -212,9 +212,15 @@ bool httpDelete(const String &pathJson) {
 }
 
 // Build a full device snapshot JSON matching existing structure
-String buildDeviceSnapshotJson(long lastSeen) {
+static String u64ToString(unsigned long long value) {
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)value);
+  return String(buffer);
+}
+
+String buildDeviceSnapshotJson(unsigned long long lastSeen) {
   String json = "{";
-  json += "\"active\":true,\"deviceType\":\"companion\",\"last_seen\":" + String(lastSeen);
+  json += "\"active\":true,\"deviceType\":\"companion\",\"last_seen\":" + u64ToString(lastSeen);
   if (pairedVehicleId.length() > 0) {
     json += ",\"pairedVehicle\":\"" + pairedVehicleId + "\"";
   }
