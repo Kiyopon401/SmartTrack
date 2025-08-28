@@ -84,6 +84,7 @@ bool wifiConnected = false;
 bool gsmConnected = false;
 bool netReady = false;
 bool isTrackingContinuous = false;
+bool simPublished = false;
 
 String pairedVehicleId = "";  // loaded via PAIR command
 String simMsisdn = "";         // SIM phone number (if available)
@@ -101,6 +102,7 @@ struct Geofence {
 unsigned long lastTrackPublishMs = 0;
 unsigned long lastHeartbeatMs = 0;
 unsigned long lastCmdPollMs = 0;
+unsigned long lastSimPublishMs = 0;
 
 // =========================
 // ====== HELPERS ==========
@@ -229,8 +231,10 @@ void publishSimIdentity() {
   Serial.print(F("  JSON: ")); Serial.println(json);
   if (httpPutJson(pathDeviceRoot() + "/sim.json", json)) {
     Serial.println(F("SIM identity published successfully"));
+    simPublished = true;
   } else {
     Serial.println(F("Failed to publish SIM identity"));
+    simPublished = false;
   }
 }
 
@@ -678,6 +682,11 @@ void loop() {
     double lat = gps.location.lat();
     double lng = gps.location.lng();
     updateGeofenceStatus(lat, lng);
+  }
+  // Retry SIM publish every 15s until it succeeds
+  if (netReady && !simPublished && (nowMs - lastSimPublishMs >= 15000)) {
+    lastSimPublishMs = nowMs;
+    publishSimIdentity();
   }
   delay(20);
 }
