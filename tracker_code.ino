@@ -297,15 +297,29 @@ void publishLocationOnce() {
 
 void updateGeofenceStatus(double lat, double lng) {
   if (!netReady || !geofence.enabled) return;
+  
   double d = distanceMeters(lat, lng, geofence.centerLat, geofence.centerLng);
   bool isOutside = d > geofence.radiusMeters;
   String status = isOutside ? "outside" : "inside";
+  
+  // Only update if there's a transition or if this is the first check
   if (isOutside != geofence.lastOutside) {
     geofence.lastOutside = isOutside;
     const String targetVid = vehicleIdForPublish();
-    httpPutJson(pathVehicleRootFor(targetVid) + "/geofence/status.json", String("\"") + status + "\"");
-    Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
-    if (isOutside) toneBuzzer(150);
+    
+    // Update the geofence status in Firebase
+    String statusJson = String("\"") + status + "\"";
+    if (httpPutJson(pathVehicleRootFor(targetVid) + "/geofence/status.json", statusJson)) {
+      Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
+    } else {
+      Serial.println(F("Failed to update geofence status"));
+    }
+    
+    // Trigger buzzer if vehicle left the geofence
+    if (isOutside) {
+      toneBuzzer(150);
+      Serial.println(F("🚨 Geofence alert: Vehicle left virtual area!"));
+    }
   }
 }
 

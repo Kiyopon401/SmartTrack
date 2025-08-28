@@ -456,6 +456,13 @@ class VehicleDetailActivity : AppCompatActivity() {
                     "setGeofenceRadius($geofenceRadiusMeters);",
                     null
                 )
+                
+                // Send radius update command to tracker if geofence is enabled
+                if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
+                    val command = "GEOFENCE_RADIUS:${geofenceRadiusMeters.toInt()}"
+                    sendCommandToCompanion(command)
+                    Log.d(TAG, "Sent geofence radius update command: $command")
+                }
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -476,10 +483,28 @@ class VehicleDetailActivity : AppCompatActivity() {
                     requestLocationPermissions()
                 }
             } else {
-                MapUtils.removeGeofenceCircle(binding.mapWebView)
-                binding.geofenceAlert.text = ""
+                // Clear geofence state when disabled
+                clearGeofenceState()
+                clearGeofenceCommandToTracker() // Clear geofence command when disabled
             }
         }
+    }
+
+    private fun clearGeofenceState() {
+        // Remove geofence circle from map
+        MapUtils.removeGeofenceCircle(binding.mapWebView)
+        
+        // Clear geofence variables
+        geofenceLat = null
+        geofenceLng = null
+        
+        // Clear alert message
+        binding.geofenceAlert.text = ""
+        
+        // Reset alert flag
+        hasPlayedAlert = false
+        
+        Log.d(TAG, "Geofence state cleared")
     }
 
     private fun setupGeofence() {
@@ -499,6 +524,10 @@ class VehicleDetailActivity : AppCompatActivity() {
                         geofenceLng!!,
                         geofenceRadiusMeters
                     )
+                    
+                    // Send geofence command to tracker device
+                    sendGeofenceCommandToTracker()
+                    
                     // Immediately check and display geofence status
                     try {
                         lastLocation?.let { loc ->
@@ -552,6 +581,19 @@ class VehicleDetailActivity : AppCompatActivity() {
             ).show()
             binding.switchGeofence.isChecked = false
         }
+    }
+
+    private fun sendGeofenceCommandToTracker() {
+        if (geofenceLat != null && geofenceLng != null) {
+            val command = "GEOFENCE_SET:${geofenceLat},${geofenceLng},${geofenceRadiusMeters.toInt()}"
+            sendCommandToCompanion(command)
+            Log.d(TAG, "Sent geofence command to tracker: $command")
+        }
+    }
+
+    private fun clearGeofenceCommandToTracker() {
+        sendCommandToCompanion("GEOFENCE_CLEAR")
+        Log.d(TAG, "Sent geofence clear command to tracker")
     }
 
     // The following function is now disabled. Tracking is handled by DeviceTrackerCompanion.
@@ -664,7 +706,7 @@ class VehicleDetailActivity : AppCompatActivity() {
             // Check geofence status
             try {
                 if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
-                val results = FloatArray(1)
+                    val results = FloatArray(1)
                     Location.distanceBetween(geofenceLat!!, geofenceLng!!, lat, lng, results)
                     val isOutside = results[0] > geofenceRadiusMeters
                     val color = if (isOutside) "red" else "green"
@@ -673,14 +715,19 @@ class VehicleDetailActivity : AppCompatActivity() {
                         val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
                         Log.w(TAG, "Geofence alarm triggered: $message")
                         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                    sendSMSWithPermissionCheck(currentVehicle.phoneNumber, message)
-                    binding.geofenceAlert.text = message
+                        sendSMSWithPermissionCheck(currentVehicle.phoneNumber, message)
+                        binding.geofenceAlert.text = message
                         val mediaPlayer = MediaPlayer.create(this, R.raw.alert_buzzer)
                         mediaPlayer.start()
                         hasPlayedAlert = true
                     } else if (!isOutside) {
                         binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
                         hasPlayedAlert = false
+                    }
+                } else {
+                    // Geofence is disabled or not set up - clear any existing alert
+                    if (binding.geofenceAlert.text.isNotEmpty()) {
+                        binding.geofenceAlert.text = ""
                     }
                 }
             } catch (e: Exception) {
@@ -716,7 +763,10 @@ class VehicleDetailActivity : AppCompatActivity() {
     }
 
     private fun isInsideGeofence(currentLat: Double, currentLng: Double): Boolean {
-        if (!isGeofenceEnabled || geofenceLat == null || geofenceLng == null) return true
+        if (!isGeofenceEnabled || geofenceLat == null || geofenceLng == null) {
+            // When geofence is disabled, return true to show normal status
+            return true
+        }
 
         return try {
             val results = FloatArray(1)
