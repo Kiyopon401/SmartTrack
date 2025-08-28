@@ -21,9 +21,9 @@
 // - SIM_*_OVERRIDE: optional hardcoded identity values; if any is non-empty, modem reads are skipped
 #define USE_SIM800L               false
 #define READ_SIM_ON_WIFI          false
-#define SIM_MSISDN_OVERRIDE       ""           // e.g. "+1234567890"
+#define SIM_MSISDN_OVERRIDE       "+639497085461"           // e.g. "+1234567890"
 #define SIM_ICCID_OVERRIDE        ""           // e.g. "8901XXXXXXXXXXXXXXX"
-#define IMEI_OVERRIDE             ""           // e.g. "86XXXXXXXXXXXXX"
+#define IMEI_OVERRIDE             "860389058785474"   
 
 // Cellular APN configuration (fallback internet connection)
 #define GSM_APN          "internet"
