@@ -83,7 +83,7 @@ HttpClient* http = nullptr;   // Will be initialized with active client
 bool wifiConnected = false;
 bool gsmConnected = false;
 bool netReady = false;
-bool isTrackingContinuous = false;
+bool isTrackingContinuous = true;
 bool simPublished = false;
 
 String pairedVehicleId = "";  // loaded via PAIR command
@@ -131,6 +131,8 @@ String qAuth() {
 }
 
 String pathVehicleRoot() { return String("/vehicles/") + DEVICE_ID; }
+String pathVehicleRootFor(const String &vid) { return String("/vehicles/") + vid; }
+String vehicleIdForPublish() { return pairedVehicleId.length() > 0 ? pairedVehicleId : String(DEVICE_ID); }
 String pathDeviceRoot()  { return String("/devices/") + DEVICE_ID; }
 String pathCommands()    { return String("/commands/") + DEVICE_ID; }
 
@@ -278,7 +280,8 @@ void publishLocationOnce() {
   String json = String("{\"latitude\":") + String(lat, 6) + 
                 ",\"longitude\":" + String(lng, 6) +
                 ",\"timestamp\":" + ts + "}";
-  if (httpPutJson(pathVehicleRoot() + "/location.json", json)) {
+  const String targetVid = vehicleIdForPublish();
+  if (httpPutJson(pathVehicleRootFor(targetVid) + "/location.json", json)) {
     Serial.println(F("Location published"));
   } else {
     Serial.println(F("Location publish failed"));
@@ -292,7 +295,8 @@ void updateGeofenceStatus(double lat, double lng) {
   String status = isOutside ? "outside" : "inside";
   if (isOutside != geofence.lastOutside) {
     geofence.lastOutside = isOutside;
-    httpPutJson(pathVehicleRoot() + "/geofence/status.json", String("\"") + status + "\"");
+    const String targetVid = vehicleIdForPublish();
+    httpPutJson(pathVehicleRootFor(targetVid) + "/geofence/status.json", String("\"") + status + "\"");
     Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
     if (isOutside) toneBuzzer(150);
   }
@@ -356,7 +360,8 @@ void onCommandReceived(const String &cmdRaw) {
                     "\"radius\":" + String(geofence.radiusMeters, 0) + "," +
                     "\"status\":\"inside\"" +
                     "}";
-      httpPutJson(pathVehicleRoot() + "/geofence.json", json);
+      const String targetVid = vehicleIdForPublish();
+      httpPutJson(pathVehicleRootFor(targetVid) + "/geofence.json", json);
     } else {
       Serial.println(F("Invalid GEOFENCE_SET format"));
     }
@@ -364,7 +369,8 @@ void onCommandReceived(const String &cmdRaw) {
     geofence.enabled = false;
     geofence.lastOutside = false;
     Serial.println(F("Geofence cleared"));
-    httpDelete(pathVehicleRoot() + "/geofence.json");
+    const String targetVid = vehicleIdForPublish();
+    httpDelete(pathVehicleRootFor(targetVid) + "/geofence.json");
   } else if (cmd.startsWith("GEOFENCE_RADIUS:")) {
     String sRad = cmd.substring(String("GEOFENCE_RADIUS:").length());
     sRad.trim();
@@ -691,6 +697,10 @@ void loop() {
   if (nowMs - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
     lastHeartbeatMs = nowMs;
     publishHeartbeat();
+    // Also publish last known location if we have a valid fix
+    if (gps.location.isValid()) {
+      publishLocationOnce();
+    }
   }
   pollCommandsIfDue();
   if (isTrackingContinuous && (nowMs - lastTrackPublishMs >= TRACK_INTERVAL_MS)) {
