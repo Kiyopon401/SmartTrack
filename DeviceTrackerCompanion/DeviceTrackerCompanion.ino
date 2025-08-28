@@ -104,6 +104,8 @@ unsigned long lastTrackPublishMs = 0;
 unsigned long lastHeartbeatMs = 0;
 unsigned long lastCmdPollMs = 0;
 unsigned long lastSimPublishMs = 0;
+unsigned long lastWiFiAttemptMs = 0;
+unsigned long wifiBackoffMs = 0; // increases on failures to avoid rapid re-inits
 
 // =========================
 // ====== HELPERS ==========
@@ -436,11 +438,23 @@ void setupTime() {
 // WiFi connection function
 bool connectWiFi() {
   if (wifiConnected) return true;
+  // Backoff to avoid spamming WiFi init logs
+  unsigned long nowMs = millis();
+  if (wifiBackoffMs > 0 && (nowMs - lastWiFiAttemptMs) < wifiBackoffMs) {
+    unsigned long remaining = wifiBackoffMs - (nowMs - lastWiFiAttemptMs);
+    Serial.printf("WiFi: backing off, retry in %lums\n", remaining);
+    return false;
+  }
   Serial.print(F("Connecting to WiFi: "));
   Serial.println(WIFI_SSID);
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  // Clean start if we have been failing
+  if (lastWiFiAttemptMs != 0 && (nowMs - lastWiFiAttemptMs) > 30000) {
+    WiFi.disconnect(true, true);
+    delay(200);
+  }
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < WIFI_TIMEOUT_MS) {
@@ -458,10 +472,14 @@ bool connectWiFi() {
     netClient = &wifiClient;
     http = new HttpClient(*netClient, DATABASE_HOST, 443);
     http->setHttpResponseTimeout(8000);
+    lastWiFiAttemptMs = nowMs;
+    wifiBackoffMs = 0; // reset backoff on success
     return true;
   } else {
     Serial.println();
     Serial.println(F("WiFi connection failed"));
+    lastWiFiAttemptMs = nowMs;
+    if (wifiBackoffMs == 0) wifiBackoffMs = 5000; else wifiBackoffMs = min(wifiBackoffMs * 2, (unsigned long)60000);
     return false;
   }
 }
