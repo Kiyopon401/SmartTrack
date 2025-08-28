@@ -6,6 +6,7 @@
 #include <time.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include "esp_system.h"
 
 // =========================
 // ====== CONFIG AREA ======
@@ -44,7 +45,7 @@
 
 // GPS serial pins for GPS6MV2 (adjust to match your GPS module)
 #define GPS_RX_PIN       15   // GPS TX -> ESP32 RX (GPIO15) - Serial2
-#define GPS_TX_PIN       2    // GPS RX -> ESP32 TX (GPIO2) - Serial2 - Note: GPIO2 has built-in LED
+#define GPS_TX_PIN       18   // GPS RX -> ESP32 TX (GPIO18) - avoid GPIO2 due to boot strap
 #define GPS_BAUD         9600
 
 // WARNING: GPIO 2 has built-in LED and can cause GPS communication issues
@@ -666,6 +667,7 @@ void troubleshootModem() {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   setImmobilized(false);
