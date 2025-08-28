@@ -158,6 +158,7 @@ bool httpPutJson(const String &pathJson, const String &json) {
   // Consume response
   String body = http->responseBody();
   Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
+  http->stop();
   return status >= 200 && status < 300;
 }
 
@@ -172,6 +173,7 @@ bool httpGet(const String &pathJson, String &outBody) {
   int status = http->responseStatusCode();
   outBody = http->responseBody();
   Serial.printf("-> Status: %d, Body: %s\n", status, outBody.c_str());
+  http->stop();
   return status >= 200 && status < 300;
 }
 
@@ -186,6 +188,7 @@ bool httpDelete(const String &pathJson) {
   int status = http->responseStatusCode();
   String body = http->responseBody();
   Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
+  http->stop();
   return status >= 200 && status < 300;
 }
 
