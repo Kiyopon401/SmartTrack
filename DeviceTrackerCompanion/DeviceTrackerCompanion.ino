@@ -208,13 +208,27 @@ bool httpDelete(const String &pathJson) {
   return status >= 200 && status < 300;
 }
 
+// Build a full device snapshot JSON matching existing structure
+String buildDeviceSnapshotJson(long lastSeen) {
+  String json = "{";
+  json += "\"active\":true,\"deviceType\":\"companion\",\"last_seen\":" + String(lastSeen);
+  if (pairedVehicleId.length() > 0) {
+    json += ",\"pairedVehicle\":\"" + pairedVehicleId + "\"";
+  }
+  json += ",\"sim\":{\"imei\":\"" + deviceImei + "\",\"simIccid\":\"" + simIccid + "\",\"simMsisdn\":\"" + simMsisdn + "\"}";
+  json += "}";
+  return json;
+}
+
 void publishHeartbeat() {
   if (!netReady) return;
   time_t nowEpoch = time(nullptr);
   long lastSeen = (nowEpoch > 100000) ? (long)nowEpoch * 1000L : (long)millis();
-
-  String json = String("{\"active\":true,\"deviceType\":\"companion\",\"last_seen\":") + lastSeen + "}";
-  httpPutJson(pathDeviceRoot() + ".json", json);
+  String json = buildDeviceSnapshotJson(lastSeen);
+  bool ok = httpPutJson(pathDeviceRoot() + ".json", json);
+  if (ok) {
+    simPublished = true;
+  }
 }
 
 void publishSimIdentity() {
