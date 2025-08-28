@@ -700,6 +700,8 @@ void loop() {
   if (gps.location.isUpdated()) {
     double lat = gps.location.lat();
     double lng = gps.location.lng();
+    Serial.printf("GPS: lat=%.6f, lng=%.6f, sats=%u, valid=%d\n",
+                  lat, lng, gps.satellites.value(), gps.location.isValid());
     updateGeofenceStatus(lat, lng);
   }
   // Retry SIM publish every 15s until it succeeds
