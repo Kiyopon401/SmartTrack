@@ -496,8 +496,8 @@ class VehicleDetailActivity : AppCompatActivity() {
         hasPlayedAlert = false
         
         // Clear any existing alert messages
-        binding.geofenceStatus.text = ""
-        binding.geofenceStatus.visibility = View.GONE
+        binding.geofenceAlert.text = ""
+        binding.geofenceAlert.visibility = View.GONE
         
         // Send clear command to tracker
         clearGeofenceCommandToTracker()
@@ -709,19 +709,19 @@ class VehicleDetailActivity : AppCompatActivity() {
                     MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
                     if (isOutside && !hasPlayedAlert) {
                         val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                        binding.geofenceStatus.text = message
-                        binding.geofenceStatus.visibility = View.VISIBLE
+                        binding.geofenceAlert.text = message
+                        binding.geofenceAlert.visibility = View.VISIBLE
                         hasPlayedAlert = true
                         // Play alert sound or vibration here if needed
                     } else if (!isOutside) {
-                        binding.geofenceStatus.text = "✅ Vehicle is within virtual area"
-                        binding.geofenceStatus.visibility = View.VISIBLE
+                        binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
+                        binding.geofenceAlert.visibility = View.VISIBLE
                         hasPlayedAlert = false
                     }
                 } else {
                     // Clear status when geofence is disabled
-                    binding.geofenceStatus.text = ""
-                    binding.geofenceStatus.visibility = View.GONE
+                    binding.geofenceAlert.text = ""
+                    binding.geofenceAlert.visibility = View.GONE
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error checking geofence status: ${e.message}")
