@@ -509,6 +509,50 @@ class VehicleDetailActivity : AppCompatActivity() {
             return
         }
 
+        // Try to get tracker's current location from Firebase first
+        if (currentVehicle.deviceId.isNotEmpty()) {
+            firebaseDb.reference.child("vehicles").child(currentVehicle.deviceId).child("location")
+                .get().addOnSuccessListener { snapshot ->
+                    val lat = snapshot.child("latitude").getValue(Double::class.java)
+                    val lng = snapshot.child("longitude").getValue(Double::class.java)
+                    
+                    if (lat != null && lng != null) {
+                        // Use tracker's location for geofence center
+                        geofenceLat = lat
+                        geofenceLng = lng
+                        MapUtils.drawGeofenceCircle(
+                            binding.mapWebView,
+                            geofenceLat!!,
+                            geofenceLng!!,
+                            geofenceRadiusMeters
+                        )
+                        
+                        // Send geofence command to tracker device
+                        sendGeofenceCommandToTracker()
+                        
+                        // Check geofence status immediately
+                        checkGeofenceStatus(lat, lng)
+                        
+                        Toast.makeText(
+                            this,
+                            "Geofence set at tracker location",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        // Fallback to phone location if no tracker data
+                        usePhoneLocationForGeofence()
+                    }
+                }.addOnFailureListener {
+                    // Fallback to phone location if Firebase fails
+                    usePhoneLocationForGeofence()
+                }
+        } else {
+            // No tracker paired, use phone location
+            usePhoneLocationForGeofence()
+        }
+    }
+
+    private fun usePhoneLocationForGeofence() {
         try {
             fusedLocationClient.lastLocation.addOnSuccessListener { location ->
                 if (location != null) {
@@ -524,33 +568,12 @@ class VehicleDetailActivity : AppCompatActivity() {
                     // Send geofence command to tracker device
                     sendGeofenceCommandToTracker()
                     
-                    // Immediately check and display geofence status
-                    try {
-                        lastLocation?.let { loc ->
-                            val results = FloatArray(1)
-                            Location.distanceBetween(
-                                geofenceLat!!, geofenceLng!!,
-                                loc.latitude, loc.longitude,
-                                results
-                            )
-                            val isOutside = results[0] > geofenceRadiusMeters
-                            val color = if (isOutside) "red" else "green"
-                            MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-                            if (isOutside) {
-                                val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                                Log.w(TAG, "Geofence alarm triggered (setup): $message")
-                                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                                binding.geofenceAlert.text = message
-                            } else {
-                                binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error in geofence setup check", e)
-                    }
+                    // Check geofence status
+                    checkGeofenceStatus(location.latitude, location.longitude)
+                    
                     Toast.makeText(
                         this,
-                        "Geofence set at current location",
+                        "Geofence set at phone location (no tracker data)",
                         Toast.LENGTH_SHORT
                     ).show()
                 } else {
@@ -576,6 +599,34 @@ class VehicleDetailActivity : AppCompatActivity() {
                 Toast.LENGTH_SHORT
             ).show()
             binding.switchGeofence.isChecked = false
+        }
+    }
+
+    private fun checkGeofenceStatus(trackerLat: Double, trackerLng: Double) {
+        try {
+            lastLocation?.let { loc ->
+                val results = FloatArray(1)
+                Location.distanceBetween(
+                    geofenceLat!!, geofenceLng!!,
+                    loc.latitude, loc.longitude,
+                    results
+                )
+                val isOutside = results[0] > geofenceRadiusMeters
+                val color = if (isOutside) "red" else "green"
+                MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
+                if (isOutside) {
+                    val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
+                    Log.w(TAG, "Geofence alarm triggered (setup): $message")
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                    binding.geofenceAlert.text = message
+                    binding.geofenceAlert.visibility = View.VISIBLE
+                } else {
+                    binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
+                    binding.geofenceAlert.visibility = View.VISIBLE
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in geofence status check", e)
         }
     }
 
