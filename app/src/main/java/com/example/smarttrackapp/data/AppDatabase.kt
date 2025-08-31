@@ -11,8 +11,8 @@ import com.example.smarttrackapp.models.Vehicle
 
 @Database(
     entities = [Vehicle::class, TripHistory::class],
-    version = 5, // Incremented version
-    exportSchema = true
+    version = 6, // Incremented version
+    exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun vehicleDao(): VehicleDao
