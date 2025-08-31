@@ -34,7 +34,6 @@
 // Firebase RTDB REST host (no protocol, no trailing slash)
 // Example: "your-project-id-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define DATABASE_HOST    "smarttrackbackup-d19e8-default-rtdb.asia-southeast1.firebasedatabase.app"
-#define DATABASE_PATH    "/.json"
 
 // Optional database secret or auth token. If empty, no auth query is appended.
 // Prefer using a scoped custom token or rules restricted to 
@@ -88,9 +87,12 @@ bool netReady = false;
 bool isTrackingContinuous = true;
 bool simPublished = false;
 
-String pairedVehicleId = "";  // Vehicle ID paired with this tracker
+String pairedVehicleId = "";  // loaded via PAIR command
+String simMsisdn = "";         // SIM phone number (if available)
+String simIccid  = "";         // SIM ICCID
+String deviceImei = "";        // Modem IMEI
 
-// Geofence structure for on-device geofencing
+// Enhanced Geofence structure with alert functionality
 struct Geofence {
     bool enabled = false;
     double centerLat = 0.0;
@@ -99,29 +101,144 @@ struct Geofence {
     bool lastOutside = false;     // Track previous state
     unsigned long lastAlertTime = 0;
     static const unsigned long ALERT_COOLDOWN_MS = 30000; // 30 seconds between alerts
-} geofence;
+};
 
-// Timing variables
-unsigned long lastTrackTime = 0;
-unsigned long lastHeartbeatTime = 0;
-unsigned long lastCmdPollTime = 0;
+Geofence geofence;
+
+unsigned long lastTrackPublishMs = 0;
+unsigned long lastHeartbeatMs = 0;
+unsigned long lastCmdPollMs = 0;
+unsigned long lastSimPublishMs = 0;
 unsigned long lastGeofenceCheckTime = 0;
 
 // =========================
-// ====== FUNCTIONS ========
+// ====== HELPERS ==========
 // =========================
+static double degreesToRadians(double deg) { return deg * 3.14159265358979323846 / 180.0; }
 
-// Calculate distance between two GPS coordinates in meters
-double distanceMeters(double lat1, double lng1, double lat2, double lng2) {
-    const double R = 6371000; // Earth's radius in meters
-    double dLat = radians(lat2 - lat1);
-    double dLng = radians(lng2 - lng1);
-    double a = sin(dLat/2) * sin(dLat/2) +
-               cos(radians(lat1)) * cos(radians(lat2)) *
-               sin(dLng/2) * sin(dLng/2);
-    double c = 2 * atan2(sqrt(a), sqrt(1-a));
-    return R * c;
+static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+  // Haversine
+  const double R = 6371000.0; // meters
+  double dLat = degreesToRadians(lat2 - lat1);
+  double dLon = degreesToRadians(lon2 - lon1);
+  double a = sin(dLat / 2) * sin(dLat / 2) +
+             cos(degreesToRadians(lat1)) * cos(degreesToRadians(lat2)) *
+             sin(dLon / 2) * sin(dLon / 2);
+  double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+  return R * c;
 }
+
+static bool hasSimOverride() {
+  return strlen(SIM_MSISDN_OVERRIDE) > 0 || strlen(SIM_ICCID_OVERRIDE) > 0 || strlen(IMEI_OVERRIDE) > 0;
+}
+
+String qAuth() {
+  if (String(DATABASE_AUTH).length() == 0) return String("");
+  return String("?auth=") + DATABASE_AUTH;
+}
+
+String pathVehicleRoot() { return String("/vehicles/") + DEVICE_ID; }
+String pathVehicleRootFor(const String &vid) { return String("/vehicles/") + vid; }
+String vehicleIdForPublish() { return pairedVehicleId.length() > 0 ? pairedVehicleId : String(DEVICE_ID); }
+String pathDeviceRoot()  { return String("/devices/") + DEVICE_ID; }
+String pathCommands()    { return String("/commands/") + DEVICE_ID; }
+
+void toneBuzzer(unsigned long ms) {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(ms);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void setImmobilized(bool enable) {
+  digitalWrite(RELAY_PIN, enable ? HIGH : LOW);
+}
+
+// WORKING HTTP FUNCTIONS FROM ORIGINAL CODE
+bool httpPutJson(const String &pathJson, const String &json) {
+  if (!http) return false;
+  String fullPath = pathJson + qAuth();
+  Serial.printf("HTTP PUT https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
+  http->beginRequest();
+  http->put(fullPath.c_str());
+  http->sendHeader("Connection", "close");
+  http->sendHeader("Content-Type", "application/json");
+  http->sendHeader("Content-Length", json.length());
+  http->beginBody();
+  http->print(json);
+  http->endRequest();
+  // Try to read a quick response, but don't block long (avoid WDT resets)
+  unsigned long t0 = millis();
+  int status = -1;
+  while (millis() - t0 < 1200) {
+    if (netClient && netClient->available()) {
+      status = http->responseStatusCode();
+      break;
+    }
+    delay(10);
+  }
+  if (status == -1) {
+    Serial.println(F("-> No immediate response (fire-and-forget)."));
+    http->stop();
+    return true; // assume success; Firebase typically processes the PUT
+  } else {
+    String body = http->responseBody();
+    Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
+    http->stop();
+    return status >= 200 && status < 300;
+  }
+}
+
+bool httpGet(const String &pathJson, String &outBody) {
+  if (!http) return false;
+  String fullPath = pathJson + qAuth();
+  Serial.printf("HTTP GET https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
+  http->beginRequest();
+  http->get(fullPath.c_str());
+  http->sendHeader("Connection", "close");
+  http->endRequest();
+  int status = http->responseStatusCode();
+  outBody = http->responseBody();
+  Serial.printf("-> Status: %d, Body: %s\n", status, outBody.c_str());
+  http->stop();
+  return status >= 200 && status < 300;
+}
+
+bool httpDelete(const String &pathJson) {
+  if (!http) return false;
+  String fullPath = pathJson + qAuth();
+  Serial.printf("HTTP DELETE https://%s%s\n", (const char*)DATABASE_HOST, fullPath.c_str());
+  http->beginRequest();
+  http->del(fullPath.c_str());
+  http->sendHeader("Connection", "close");
+  http->endRequest();
+  int status = http->responseStatusCode();
+  String body = http->responseBody();
+  Serial.printf("-> Status: %d, Body: %s\n", status, body.c_str());
+  http->stop();
+  return status >= 200 && status < 300;
+}
+
+// Build a full device snapshot JSON matching existing structure
+static String u64ToString(unsigned long long value) {
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)value);
+  return String(buffer);
+}
+
+String buildDeviceSnapshotJson(unsigned long long lastSeen) {
+  String json = "{";
+  json += "\"active\":true,\"deviceType\":\"companion\",\"last_seen\":" + u64ToString(lastSeen);
+  if (pairedVehicleId.length() > 0) {
+    json += ",\"pairedVehicle\":\"" + pairedVehicleId + "\"";
+  }
+  json += ",\"sim\":{\"imei\":\"" + deviceImei + "\",\"simIccid\":\"" + simIccid + "\",\"simMsisdn\":\"" + simMsisdn + "\"}";
+  json += "}";
+  return json;
+}
+
+// =========================
+// ====== GEOFENCING =======
+// =========================
 
 // Check geofence status and send alerts if needed
 void checkGeofenceStatus() {
@@ -137,26 +254,25 @@ void checkGeofenceStatus() {
     bool isOutside = distance > geofence.radiusMeters;
     unsigned long now = millis();
 
-    // Only send alert if state changed and cooldown has passed
+    // Check if state changed and cooldown has passed
     if (isOutside != geofence.lastOutside && 
-        (now - geofence.lastAlertTime) > Geofence::ALERT_COOLDOWN_MS) {
+        (now - geofence.lastAlertTime) >= geofence.ALERT_COOLDOWN_MS) {
         
-        String alertMsg;
-        if (isOutside) {
-            alertMsg = "GEOFENCE_ALERT:OUTSIDE:" + String(distance, 0) + "m";
-            // Optional: Activate buzzer for immediate feedback
-            toneBuzzer(1500);
-        } else {
-            alertMsg = "GEOFENCE_ALERT:INSIDE:" + String(distance, 0) + "m";
-        }
-
-        sendAlertToApp(alertMsg);
         geofence.lastAlertTime = now;
         geofence.lastOutside = isOutside;
+
+        if (isOutside) {
+            // Vehicle left geofence
+            sendAlertToApp("GEOFENCE_EXIT: Vehicle left geofence area");
+            toneBuzzer(1500); // Beep for 1.5 seconds
+        } else {
+            // Vehicle entered geofence
+            sendAlertToApp("GEOFENCE_ENTER: Vehicle entered geofence area");
+        }
     }
 }
 
-// Send alert message to app via Firebase
+// Send alert to app via Firebase
 void sendAlertToApp(String alertMsg) {
     if (!netReady || http == nullptr) {
         Serial.println("Network not ready for alert");
@@ -167,7 +283,7 @@ void sendAlertToApp(String alertMsg) {
     String jsonData = "\"" + alertMsg + "\"";
     
     http->beginRequest();
-    http->put(path);
+    http->put(path + qAuth());
     http->sendHeader("Content-Type", "application/json");
     http->sendHeader("Content-Length", jsonData.length());
     http->beginBody();
@@ -182,426 +298,464 @@ void sendAlertToApp(String alertMsg) {
     }
 }
 
-// Process commands received from the app
-void onCommandReceived(String command) {
-    Serial.println("Received command: " + command);
-    
-    if (command.startsWith("GEOFENCE_SET:")) {
-        // Format: GEOFENCE_SET:lat,lng,radius
-        String params = command.substring(13);
-        int firstComma = params.indexOf(',');
-        int secondComma = params.indexOf(',', firstComma + 1);
-        
-        if (firstComma > 0 && secondComma > firstComma) {
-            geofence.centerLat = params.substring(0, firstComma).toDouble();
-            geofence.centerLng = params.substring(firstComma + 1, secondComma).toDouble();
-            geofence.radiusMeters = params.substring(secondComma + 1).toDouble();
-            geofence.enabled = true;
-            geofence.lastOutside = false; // Reset state
-            geofence.lastAlertTime = 0;   // Reset cooldown
-            
-            Serial.println("Geofence set: " + String(geofence.centerLat, 6) + 
-                          ", " + String(geofence.centerLng, 6) + 
-                          ", radius: " + String(geofence.radiusMeters) + "m");
-        }
-    }
-    else if (command == "GEOFENCE_CLEAR") {
-        geofence.enabled = false;
-        Serial.println("Geofence cleared");
-    }
-    else if (command.startsWith("GEOFENCE_RADIUS:")) {
-        // Format: GEOFENCE_RADIUS:radius
-        String radiusStr = command.substring(16);
-        geofence.radiusMeters = radiusStr.toDouble();
-        Serial.println("Geofence radius updated: " + String(geofence.radiusMeters) + "m");
-    }
-    else if (command == "TRACK") {
-        publishLocationOnce();
-    }
-    else if (command == "START_TRACKING") {
-        isTrackingContinuous = true;
-        Serial.println("Continuous tracking started");
-    }
-    else if (command == "STOP") {
-        isTrackingContinuous = false;
-        Serial.println("Tracking stopped");
-    }
-    else if (command == "IMMOBILIZE") {
-        setImmobilized(true);
-    }
-    else if (command == "UNLOCK") {
-        setImmobilized(false);
-    }
-    else if (command.startsWith("PAIR:")) {
-        pairedVehicleId = command.substring(5);
-        Serial.println("Paired with vehicle: " + pairedVehicleId);
-    }
-}
+// =========================
+// ====== PUBLISHING =======
+// =========================
 
-// Poll for commands from the app
-void pollCommandsIfDue() {
-    unsigned long now = millis();
-    if (now - lastCmdPollTime >= CMD_POLL_INTERVAL_MS) {
-        lastCmdPollTime = now;
-        
-        if (!netReady || http == nullptr) {
-            return;
-        }
-
-        String path = String("/commands/") + String(DEVICE_ID) + String(".json");
-        http->beginRequest();
-        http->get(path);
-        http->endRequest();
-        
-        int statusCode = http->responseStatusCode();
-        if (statusCode == 200) {
-            String response = http->responseBody();
-            if (response != "null" && response.length() > 2) {
-                // Remove quotes from response
-                String command = response.substring(1, response.length() - 1);
-                onCommandReceived(command);
-                
-                // Clear the command after processing
-                httpDelete(path);
-            }
-        }
-    }
-}
-
-// Update geofence status (legacy function - now secondary to checkGeofenceStatus)
-void updateGeofenceStatus() {
-    if (!geofence.enabled || !gps.location.isValid()) {
-        return;
-    }
-
-    double distance = distanceMeters(
-        geofence.centerLat, geofence.centerLng,
-        gps.location.lat(), gps.location.lng()
-    );
-
-    bool isOutside = distance > geofence.radiusMeters;
-    
-    // Update status in Firebase (for app display)
-    String status = isOutside ? "outside" : "inside";
-    String path = String("/vehicles/") + String(DEVICE_ID) + String("/geofence_status.json");
-    String jsonData = "{\"status\":\"" + status + "\",\"distance\":" + String(distance, 1) + "}";
-    
-    httpPutJson(path, jsonData);
-}
-
-// Helper function to make HTTP PUT requests with JSON
-void httpPutJson(String path, String jsonData) {
-    if (!netReady || http == nullptr) {
-        Serial.println("Network not ready for HTTP PUT");
-        return;
-    }
-    
-    Serial.print("Sending PUT to: ");
-    Serial.println(path);
-    Serial.print("Data: ");
-    Serial.println(jsonData);
-    
-    http->beginRequest();
-    http->put(path);
-    http->sendHeader("Content-Type", "application/json");
-    http->sendHeader("Content-Length", jsonData.length());
-    http->beginBody();
-    http->print(jsonData);
-    http->endRequest();
-    
-    int statusCode = http->responseStatusCode();
-    Serial.print("HTTP Status: ");
-    Serial.println(statusCode);
-    
-    if (statusCode == 200) {
-        Serial.println("HTTP PUT successful");
-    } else if (statusCode == -3) {
-        Serial.println("HTTP PUT failed: Connection error (-3)");
-        Serial.println("Check WiFi connection and Firebase host");
-        // Try to reconnect
-        netReady = false;
-        ensureNetwork();
-    } else {
-        Serial.println("HTTP PUT failed: " + String(statusCode));
-    }
-}
-
-// Helper function to make HTTP GET requests
-String httpGet(String path) {
-    if (!netReady || http == nullptr) return "";
-    
-    http->beginRequest();
-    http->get(path);
-    http->endRequest();
-    
-    int statusCode = http->responseStatusCode();
-    if (statusCode == 200) {
-        return http->responseBody();
-    }
-    return "";
-}
-
-// Helper function to make HTTP DELETE requests
-void httpDelete(String path) {
-    if (!netReady || http == nullptr) return;
-    
-    http->beginRequest();
-    http->del(path);
-    http->endRequest();
-    
-    int statusCode = http->responseStatusCode();
-    if (statusCode != 200) {
-        Serial.println("HTTP DELETE failed: " + String(statusCode));
-    }
-}
-
-// Publish heartbeat to Firebase
 void publishHeartbeat() {
-    if (!netReady || http == nullptr) return;
-    
-    String path = String("/devices/") + String(DEVICE_ID) + String("/heartbeat.json");
-    String jsonData = "{\"timestamp\":" + String(millis()) + "}";
-    httpPutJson(path, jsonData);
+  if (!netReady) return;
+  time_t nowEpoch = time(nullptr);
+  // Use unsigned long long to avoid negative wrap and keep ms precision
+  unsigned long long lastSeen = (nowEpoch > 100000) ? (unsigned long long)nowEpoch * 1000ULL : (unsigned long long)millis();
+  String json = buildDeviceSnapshotJson(lastSeen);
+  bool ok = httpPutJson(pathDeviceRoot() + ".json", json);
+  if (ok) {
+    simPublished = true;
+  }
 }
 
-// Publish SIM identity to Firebase
 void publishSimIdentity() {
-    if (!netReady || http == nullptr) return;
-    
-    String path = String("/devices/") + String(DEVICE_ID) + String("/sim_info.json");
-    String jsonData = "{\"msisdn\":\"" + String(SIM_MSISDN_OVERRIDE) + "\",\"iccid\":\"" + String(SIM_ICCID_OVERRIDE) + "\",\"imei\":\"" + String(IMEI_OVERRIDE) + "\"}";
-    httpPutJson(path, jsonData);
+  if (!netReady) return;
+  Serial.println(F("Publishing SIM identity to Firebase:"));
+  Serial.print(F("  Phone Number: ")); Serial.println(simMsisdn);
+  Serial.print(F("  ICCID: ")); Serial.println(simIccid);
+  Serial.print(F("  IMEI: ")); Serial.println(deviceImei);
+  String json = String("{") +
+                "\"simMsisdn\":\"" + simMsisdn + "\"," +
+                "\"simIccid\":\"" + simIccid + "\"," +
+                "\"imei\":\"" + deviceImei + "\"" +
+                "}";
+  Serial.print(F("  JSON: ")); Serial.println(json);
+  if (httpPutJson(pathDeviceRoot() + "/sim.json", json)) {
+    Serial.println(F("SIM identity published successfully"));
+    simPublished = true;
+  } else {
+    Serial.println(F("Failed to publish SIM identity"));
+    simPublished = false;
+  }
 }
 
-// Publish current location to Firebase
-void publishLocationOnce() {
-    if (!netReady || http == nullptr || !gps.location.isValid()) return;
-    
-    String path = String("/vehicles/") + String(DEVICE_ID) + String("/location.json");
-    String jsonData = "{\"latitude\":" + String(gps.location.lat(), 6) + 
-                      ",\"longitude\":" + String(gps.location.lng(), 6) + 
-                      ",\"timestamp\":" + String(millis()) + 
-                      ",\"altitude\":" + String(gps.altitude.meters()) + 
-                      ",\"speed\":" + String(gps.speed.kmph()) + 
-                      ",\"course\":" + String(gps.course.deg()) + "}";
-    httpPutJson(path, jsonData);
-}
-
-// Set immobilization status
-void setImmobilized(bool immobilized) {
-    digitalWrite(RELAY_PIN, immobilized ? HIGH : LOW);
-    
-    // Publish status to Firebase
-    String path = String("/vehicles/") + String(DEVICE_ID) + String("/immobilized.json");
-    String jsonData = "{\"status\":" + String(immobilized ? "true" : "false") + "}";
-    httpPutJson(path, jsonData);
-    
-    Serial.println(immobilized ? "Vehicle immobilized" : "Vehicle unlocked");
-}
-
-// Activate buzzer
-void toneBuzzer(int frequency) {
-    tone(BUZZER_PIN, frequency, 1000); // 1 second beep
-}
-
-// Setup time synchronization
-void setupTime() {
-    configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov");
-    Serial.println("Waiting for NTP time sync...");
-    time_t now = 0;
-    int retries = 0;
-    while (now < 24 * 3600 && retries < 10) {
-        Serial.print(".");
-        delay(500);
-        now = time(nullptr);
-        retries++;
-    }
-    Serial.println();
-    if (now > 24 * 3600) {
-        Serial.println("Time synchronized");
-    } else {
-        Serial.println("Time sync failed");
-    }
-}
-
-// Connect to WiFi
-bool connectWiFi() {
-    if (wifiConnected) return true;
-    
-    Serial.print("Connecting to WiFi: ");
-    Serial.println(WIFI_SSID);
-    
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    
-    unsigned long startTime = millis();
-    while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < WIFI_TIMEOUT_MS) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println();
-    
-    if (WiFi.status() == WL_CONNECTED) {
-        wifiConnected = true;
-        Serial.println("WiFi connected");
-        Serial.print("IP address: ");
-        Serial.println(WiFi.localIP());
-        return true;
-    } else {
-        Serial.println("WiFi connection failed");
-        return false;
-    }
-}
-
-// Read SIM information from modem
-void readSimInfo() {
-    if (!USE_SIM800L) return;
-    
-    Serial.println("Reading SIM information...");
-    
-    // Read MSISDN (phone number)
-    if (strlen(SIM_MSISDN_OVERRIDE) == 0) {
-        modem.sendAT("+CNUM");
-        if (modem.waitResponse(2000L, "+CNUM:") == 1) {
-            String response = modem.stream.readString();
-            Serial.println("MSISDN: " + response);
-        }
-    }
-    
-    // Read ICCID (SIM card number)
-    if (strlen(SIM_ICCID_OVERRIDE) == 0) {
-        modem.sendAT("+CCID");
-        if (modem.waitResponse(2000L, "+CCID:") == 1) {
-            String response = modem.stream.readString();
-            Serial.println("ICCID: " + response);
-        }
-    }
-    
-    // Read IMEI (device ID)
-    if (strlen(IMEI_OVERRIDE) == 0) {
-        modem.sendAT("+CGSN");
-        if (modem.waitResponse(2000L, "+CGSN:") == 1) {
-            String response = modem.stream.readString();
-            Serial.println("IMEI: " + response);
-        }
-    }
-}
-
-// Connect to cellular network
-bool connectCellular() {
-    if (!USE_SIM800L) return false;
-    
-    Serial.println("Initializing modem...");
-    modem.restart();
-    
-    String modemInfo = modem.getModemInfo();
-    Serial.print("Modem: ");
-    Serial.println(modemInfo);
-    
-    Serial.print("Waiting for network...");
-    if (!modem.waitForNetwork()) {
-        Serial.println(" fail");
-        return false;
-    }
-    Serial.println(" OK");
-    
-    Serial.print("Connecting to ");
-    Serial.print(GSM_APN);
-    if (!modem.gprsConnect(GSM_APN, GSM_USER, GSM_PASS)) {
-        Serial.println(" fail");
-        return false;
-    }
-    Serial.println(" OK");
-    
-    gsmConnected = true;
+bool currentLocation(double &lat, double &lng) {
+  while (GPSSerial.available() > 0) {
+    gps.encode(GPSSerial.read());
+  }
+  if (gps.location.isValid()) {
+    lat = gps.location.lat();
+    lng = gps.location.lng();
     return true;
+  }
+  return false;
 }
 
-// Ensure network connection (WiFi or Cellular)
-bool ensureNetwork() {
-    if (netReady) return true;
-    
-    // Try WiFi first
-    if (connectWiFi()) {
-        netClient = &wifiClient;
-        http = new HttpClient(*netClient, DATABASE_HOST, 443);
-        http->setHttpResponseTimeout(30000); // Increased timeout
-        netReady = true;
-        Serial.println("Network ready (WiFi)");
-        Serial.print("Connected to: ");
-        Serial.println(DATABASE_HOST);
-        return true;
+void publishLocationOnce() {
+  if (!netReady) return;
+  double lat, lng;
+  if (!currentLocation(lat, lng)) {
+    Serial.println(F("GPS location not ready"));
+    return;
+  }
+  time_t nowEpoch = time(nullptr);
+  long ts = (nowEpoch > 100000) ? (long)nowEpoch * 1000L : (long)millis();
+
+  String json = String("{\"latitude\":") + String(lat, 6) + 
+                ",\"longitude\":" + String(lng, 6) +
+                ",\"timestamp\":" + ts + "}";
+  const String targetVid = vehicleIdForPublish();
+  if (httpPutJson(pathVehicleRootFor(targetVid) + "/location.json", json)) {
+    Serial.println(F("Location published"));
+  } else {
+    Serial.println(F("Location publish failed"));
+  }
+}
+
+void updateGeofenceStatus(double lat, double lng) {
+  if (!netReady || !geofence.enabled) return;
+  double d = distanceMeters(lat, lng, geofence.centerLat, geofence.centerLng);
+  bool isOutside = d > geofence.radiusMeters;
+  String status = isOutside ? "outside" : "inside";
+  if (isOutside != geofence.lastOutside) {
+    geofence.lastOutside = isOutside;
+    const String targetVid = vehicleIdForPublish();
+    httpPutJson(pathVehicleRootFor(targetVid) + "/geofence/status.json", String("\"") + status + "\"");
+    Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
+    if (isOutside) toneBuzzer(150);
+  }
+}
+
+void clearCommand() {
+  httpPutJson(pathCommands() + ".json", "\"\""); // write empty string
+}
+
+// =========================
+// ====== COMMANDS =========
+// =========================
+
+void onCommandReceived(const String &cmdRaw) {
+  String cmd = cmdRaw;
+  cmd.trim();
+  if (cmd.length() == 0 || cmd == "\"\"") return;
+  if (cmd.startsWith("\"") && cmd.endsWith("\"")) {
+    cmd.remove(0, 1);
+    cmd.remove(cmd.length() - 1, 1);
+  }
+
+  Serial.printf("Command received: %s\n", cmd.c_str());
+
+  if (cmd == "TRACK") {
+    publishLocationOnce();
+  } else if (cmd == "START_TRACKING") {
+    isTrackingContinuous = true;
+    Serial.println(F("Continuous tracking enabled"));
+  } else if (cmd == "STOP") {
+    isTrackingContinuous = false;
+    Serial.println(F("Tracking stopped"));
+  } else if (cmd == "IMMOBILIZE") {
+    setImmobilized(true);
+    Serial.println(F("Immobilizer engaged"));
+  } else if (cmd == "UNLOCK") {
+    setImmobilized(false);
+    Serial.println(F("Immobilizer disengaged"));
+  } else if (cmd.startsWith("PAIR:")) {
+    pairedVehicleId = cmd.substring(5);
+    pairedVehicleId.trim();
+    Serial.printf("Paired vehicle id: %s\n", pairedVehicleId.c_str());
+    String json = String("{\"pairedVehicleId\":\"") + pairedVehicleId + "\"}";
+    httpPutJson(pathDeviceRoot() + ".json", json);
+  } else if (cmd.startsWith("GEOFENCE_SET:")) {
+    String args = cmd.substring(String("GEOFENCE_SET:").length());
+    args.trim();
+    int c1 = args.indexOf(',');
+    int c2 = args.indexOf(',', c1 + 1);
+    if (c1 > 0 && c2 > c1) {
+      String sLat = args.substring(0, c1);
+      String sLng = args.substring(c1 + 1, c2);
+      String sRad = args.substring(c2 + 1);
+      geofence.centerLat = sLat.toDouble();
+      geofence.centerLng = sLng.toDouble();
+      geofence.radiusMeters = sRad.toDouble();
+      geofence.enabled = true;
+      geofence.lastOutside = false;
+      geofence.lastAlertTime = 0; // Reset cooldown
+      Serial.printf("Geofence set: lat=%.6f lng=%.6f r=%.2fm\n", geofence.centerLat, geofence.centerLng, geofence.radiusMeters);
+      String json = String("{") +
+                    "\"center\":{\"lat\":" + String(geofence.centerLat, 6) + ",\"lng\":" + String(geofence.centerLng, 6) + "}," +
+                    "\"radius\":" + String(geofence.radiusMeters, 0) + "," +
+                    "\"status\":\"inside\"" +
+                    "}";
+      const String targetVid = vehicleIdForPublish();
+      httpPutJson(pathVehicleRootFor(targetVid) + "/geofence.json", json);
+    } else {
+      Serial.println(F("Invalid GEOFENCE_SET format"));
     }
-    
-    // Fallback to cellular if enabled
-    if (USE_SIM800L && connectCellular()) {
-        netClient = &gsmClient;
-        http = new HttpClient(*netClient, DATABASE_HOST, 443);
-        http->setHttpResponseTimeout(30000); // Increased timeout
-        netReady = true;
-        Serial.println("Network ready (Cellular)");
-        Serial.print("Connected to: ");
-        Serial.println(DATABASE_HOST);
-        return true;
+  } else if (cmd == "GEOFENCE_CLEAR") {
+    geofence.enabled = false;
+    geofence.lastOutside = false;
+    Serial.println(F("Geofence cleared"));
+    const String targetVid = vehicleIdForPublish();
+    httpDelete(pathVehicleRootFor(targetVid) + "/geofence.json");
+  } else if (cmd.startsWith("GEOFENCE_RADIUS:")) {
+    String sRad = cmd.substring(String("GEOFENCE_RADIUS:").length());
+    sRad.trim();
+    if (geofence.enabled) {
+      geofence.radiusMeters = sRad.toDouble();
+      Serial.printf("Geofence radius updated: %.2fm\n", geofence.radiusMeters);
     }
+  } else if (cmd == "READ_SIM") {
+    Serial.println(F("Manual SIM info read requested"));
+    readSimInfo();
+    publishSimIdentity();
+  } else if (cmd == "TROUBLESHOOT") {
+    Serial.println(F("Manual troubleshooting requested"));
+    troubleshootModem();
+    readSimInfo();
+  } else if (cmd == "TEST_AT") {
+    if (!USE_SIM800L) {
+      Serial.println(F("TEST_AT skipped: USE_SIM800L=false"));
+    } else {
+      Serial.println(F("Manual AT test requested"));
+      ModemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+      delay(1000);
+      Serial.println(F("Sending AT command..."));
+      modem.sendAT("AT");
+      String response = "";
+      int result = modem.waitResponse(3000L, response);
+      Serial.print(F("AT Response: ")); Serial.println(response);
+      Serial.print(F("AT Result: ")); Serial.println(result);
+    }
+  } else {
+    Serial.println(F("Unknown command"));
+  }
+
+  clearCommand();
+}
+
+void pollCommandsIfDue() {
+  const unsigned long nowMs = millis();
+  if (nowMs - lastCmdPollMs < CMD_POLL_INTERVAL_MS) return;
+  lastCmdPollMs = nowMs;
+
+  String body;
+  if (httpGet(pathCommands() + ".json", body)) {
+    if (body.length() > 0 && body != "null" && body != "\"\"") {
+      onCommandReceived(body);
+    }
+  } else {
+    Serial.println(F("Command poll failed"));
+  }
+}
+
+// =========================
+// ====== NETWORK ==========
+// =========================
+
+void setupTime() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+}
+
+// WiFi connection function - WORKING VERSION FROM ORIGINAL
+bool connectWiFi() {
+  if (wifiConnected) return true;
+  
+  Serial.print(F("Connecting to WiFi: "));
+  Serial.println(WIFI_SSID);
+  
+  // Proper WiFi initialization sequence
+  WiFi.disconnect(true, true);  // Disconnect and clear stored credentials
+  delay(1000);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < WIFI_TIMEOUT_MS) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    Serial.println();
+    Serial.print(F("WiFi connected! IP: "));
+    Serial.println(WiFi.localIP());
     
-    Serial.println("No network connection available");
+    // Configure client after successful connection
+    wifiClient.setInsecure();
+    wifiClient.setTimeout(15000);
+    netClient = &wifiClient;
+    http = new HttpClient(*netClient, DATABASE_HOST, 443);
+    http->setHttpResponseTimeout(8000);
+    return true;
+  } else {
+    Serial.println();
+    Serial.println(F("WiFi connection failed"));
     return false;
+  }
+}
+
+// Function to read SIM information
+void readSimInfo() {
+  if (hasSimOverride()) {
+    simMsisdn = String(SIM_MSISDN_OVERRIDE);
+    simIccid  = String(SIM_ICCID_OVERRIDE);
+    deviceImei = String(IMEI_OVERRIDE);
+    Serial.println(F("Using hardcoded SIM identity overrides"));
+    return;
+  }
+  if (!USE_SIM800L) {
+    Serial.println(F("SIM read skipped: USE_SIM800L=false"));
+    return;
+  }
+  if (wifiConnected && !READ_SIM_ON_WIFI) {
+    Serial.println(F("SIM read skipped on WiFi (READ_SIM_ON_WIFI=false)"));
+    return;
+  }
+
+  Serial.println(F("Reading SIM information..."));
+  Serial.println(F("Initializing modem for SIM reading..."));
+  ModemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+  delay(1000);
+
+  Serial.println(F("Testing AT communication with different baud rates..."));
+  int baudRates[] = {9600, 115200, 57600, 38400, 19200};
+  bool atOk = false;
+  for (int i = 0; i < 5; i++) {
+    Serial.print(F("Trying baud rate: ")); Serial.println(baudRates[i]);
+    ModemSerial.updateBaudRate(baudRates[i]);
+    delay(500);
+    modem.sendAT("AT");
+    if (modem.waitResponse(2000L) == 1) {
+      Serial.print(F("AT communication OK at baud rate: ")); Serial.println(baudRates[i]);
+      atOk = true;
+      break;
+    }
+  }
+  if (!atOk) {
+    Serial.println(F("AT communication failed at all baud rates"));
+    Serial.println(F("Check wiring: TX->GPIO16, RX->GPIO17, power, and SIM card"));
+    return;
+  }
+
+  Serial.println(F("Restarting modem..."));
+  modem.restart();
+  delay(3000);
+  modem.sendAT("AT");
+  if (modem.waitResponse(2000L) != 1) {
+    Serial.println(F("Modem restart failed"));
+    return;
+  }
+  Serial.println(F("Modem restart successful"));
+
+  Serial.println(F("Waiting for SIM to be ready..."));
+  delay(2000);
+
+  modem.sendAT("+CPIN?");
+  String simStatus = "";
+  if (modem.waitResponse(3000L, simStatus) == 1) {
+    Serial.print(F("SIM Status: ")); Serial.println(simStatus);
+  } else {
+    Serial.println(F("Could not check SIM status"));
+  }
+
+  Serial.println(F("Getting IMEI..."));
+  deviceImei = modem.getIMEI();
+  Serial.print(F("IMEI: ")); Serial.println(deviceImei);
+
+  Serial.println(F("Getting ICCID..."));
+  simIccid = modem.getSimCCID();
+  Serial.print(F("ICCID: ")); Serial.println(simIccid);
+
+  simMsisdn = "";
+  Serial.println(F("Trying AT+CNUM..."));
+  modem.sendAT("+CNUM");
+  if (modem.waitResponse(3000L, simMsisdn) == 1) {
+    Serial.print(F("AT+CNUM response: ")); Serial.println(simMsisdn);
+    int p1 = simMsisdn.indexOf('"');
+    if (p1 >= 0) {
+      int p2 = simMsisdn.indexOf('"', p1 + 1);
+      if (p2 > p1) {
+        int p3 = simMsisdn.indexOf('"', p2 + 1);
+        int p4 = simMsisdn.indexOf('"', p3 + 1);
+        if (p3 >= 0 && p4 > p3) {
+          String msisdn = simMsisdn.substring(p3 + 1, p4);
+          msisdn.trim();
+          if (msisdn.length() > 0 && msisdn != "" && msisdn != "\"\"") {
+            simMsisdn = msisdn;
+            Serial.print(F("Phone number found: ")); Serial.println(simMsisdn);
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  Serial.println(F("Trying AT+CPBR..."));
+  modem.sendAT("+CPBR=1");
+  if (modem.waitResponse(3000L, simMsisdn) == 1) {
+    Serial.print(F("AT+CPBR response: ")); Serial.println(simMsisdn);
+    int p1 = simMsisdn.indexOf('"');
+    if (p1 >= 0) {
+      int p2 = simMsisdn.indexOf('"', p1 + 1);
+      if (p2 > p1) {
+        String msisdn = simMsisdn.substring(p1 + 1, p2);
+        msisdn.trim();
+        if (msisdn.length() > 0 && msisdn != "" && msisdn != "\"\"") {
+          simMsisdn = msisdn;
+          Serial.print(F("Phone number found: ")); Serial.println(simMsisdn);
+          return;
+        }
+      }
+    }
+  }
+
+  Serial.println(F("Trying AT+COPS..."));
+  modem.sendAT("+COPS?");
+  if (modem.waitResponse(3000L, simMsisdn) == 1) {
+    Serial.print(F("AT+COPS response: ")); Serial.println(simMsisdn);
+  }
+
+  Serial.println(F("Trying AT+CLIR..."));
+  modem.sendAT("+CLIR?");
+  if (modem.waitResponse(3000L, simMsisdn) == 1) {
+    Serial.print(F("AT+CLIR response: ")); Serial.println(simMsisdn);
+  }
+
+  if (simMsisdn == "" || simMsisdn == "\"\"") {
+    simMsisdn = "";
+    Serial.println(F("Could not retrieve phone number"));
+  }
+  Serial.println(F("SIM information reading complete"));
+}
+
+// Cellular connection function
+bool connectCellular() {
+  if (!USE_SIM800L) return false;
+  if (gsmConnected) return true;
+  Serial.println(F("Bringing up cellular modem..."));
+  ModemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
+  delay(600);
+  modem.restart();
+  Serial.print(F("Connecting to APN: "));
+  Serial.println(GSM_APN);
+  if (!modem.gprsConnect(GSM_APN, GSM_USER, GSM_PASS)) {
+    Serial.println(F("GPRS connect failed"));
+    return false;
+  }
+  gsmConnected = true;
+  Serial.println(F("GPRS connected and TLS client ready"));
+  netClient = &gsmClient;
+  http = new HttpClient(*netClient, DATABASE_HOST, 443);
+  http->setHttpResponseTimeout(8000);
+  return true;
+}
+
+void ensureNetwork() {
+  if (netReady) return;
+  if (connectWiFi()) {
+    netReady = true;
+    Serial.println(F("Network ready via WiFi"));
+    if (READ_SIM_ON_WIFI || hasSimOverride()) {
+      readSimInfo();
+    }
+    return;
+  }
+  if (USE_SIM800L && connectCellular()) {
+    netReady = true;
+    Serial.println(F("Network ready via Cellular"));
+    readSimInfo();
+    return;
+  }
+  Serial.println(F("Both WiFi and Cellular failed"));
 }
 
 // Check network status and reconnect if needed
 void checkNetworkStatus() {
-    if (!netReady) {
-        Serial.println("Network not ready, attempting connection...");
-        ensureNetwork();
-        return;
-    }
-    
-    bool networkOk = false;
-    if (wifiConnected) {
-        networkOk = (WiFi.status() == WL_CONNECTED);
-        if (!networkOk) {
-            Serial.println("WiFi connection lost");
-        }
-    } else if (gsmConnected) {
-        networkOk = modem.isGprsConnected();
-        if (!networkOk) {
-            Serial.println("Cellular connection lost");
-        }
-    }
-    
-    if (!networkOk) {
-        Serial.println("Network connection lost, reconnecting...");
-        netReady = false;
-        wifiConnected = false;
-        gsmConnected = false;
-        delete http;
-        http = nullptr;
-        ensureNetwork();
-    } else {
-        Serial.println("Network status: OK");
-    }
+  if (!netReady) return;
+  if (wifiConnected && WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("WiFi connection lost, trying to reconnect..."));
+    wifiConnected = false;
+    netReady = false;
+    ensureNetwork();
+  } else if (gsmConnected && USE_SIM800L && !modem.isGprsConnected()) {
+    Serial.println(F("Cellular connection lost, trying to reconnect..."));
+    gsmConnected = false;
+    netReady = false;
+    ensureNetwork();
+  }
 }
 
-// Troubleshoot modem if needed
+// Hardware troubleshooting function
 void troubleshootModem() {
-    if (!USE_SIM800L) return;
-    
-    Serial.println("Troubleshooting modem...");
-    
-    // Check if modem responds
-    modem.sendAT("AT");
-    if (modem.waitResponse(1000L) != 1) {
-        Serial.println("Modem not responding, restarting...");
-        modem.restart();
-        delay(3000);
-    }
-    
-    // Check signal quality
-    modem.sendAT("+CSQ");
-    if (modem.waitResponse(2000L, "+CSQ:") == 1) {
-        String response = modem.stream.readString();
-        Serial.println("Signal quality: " + response);
-    }
+  Serial.println(F("=== MODEM TROUBLESHOOTING ==="));
+  Serial.println(F("1. Check power: SIM800L needs 3.7V-4.2V (not 3.3V)"));
+  Serial.println(F("2. Check wiring: TX->GPIO16, RX->GPIO17"));
+  Serial.println(F("3. Check SIM card: Inserted properly, not locked"));
+  Serial.println(F("4. Check antenna: Connected to SIM800L"));
+  Serial.println(F("5. Check power LED: Should be steady on"));
+  Serial.println(F("6. Check network LED: Should blink every 3 seconds"));
+  Serial.println(F("7. Try power cycling: Unplug/replug power"));
+  Serial.println(F("================================="));
 }
 
 // =========================
@@ -609,101 +763,68 @@ void troubleshootModem() {
 // =========================
 
 void setup() {
-    Serial.begin(115200);
-    delay(1000);
-    
-    Serial.println("=== Vehicle Tracker Starting ===");
-    Serial.println("Device ID: " + String(DEVICE_ID));
-    
-    // Initialize pins
-    pinMode(RELAY_PIN, OUTPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);  // Start unlocked
-    digitalWrite(BUZZER_PIN, LOW);
-    
-    // Initialize GPS
-    GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-    Serial.println("GPS initialized on Serial2");
-    
-    // Initialize modem if enabled
-    if (USE_SIM800L) {
-        ModemSerial.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
-        Serial.println("Modem initialized on Serial1");
+  Serial.begin(115200);
+  delay(200);
+  Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  setImmobilized(false);
+  digitalWrite(BUZZER_PIN, LOW);
+  GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  setupTime();
+  ensureNetwork();
+  delay(1000);
+  if (netReady) {
+    // Probe Firebase connectivity: get current device node
+    String probe;
+    bool ok = httpGet(pathDeviceRoot() + ".json", probe);
+    Serial.printf("Connectivity probe %s.\n", ok ? "OK" : "FAILED");
+    if (!ok) {
+      Serial.println(F("If unauthorized, set DATABASE_AUTH or relax RTDB rules for testing."));
     }
-    
-    // Setup time
-    setupTime();
-    
-    // Connect to network
-    ensureNetwork();
-    
-    // Read SIM info if on cellular
-    if (USE_SIM800L || READ_SIM_ON_WIFI) {
-        readSimInfo();
-    }
-    
-    // Publish initial device status
-    if (netReady) {
-        Serial.println("Testing Firebase connection...");
-        
-        // Test with a simple PUT request
-        String testPath = String("/test/") + String(DEVICE_ID) + String(".json");
-        httpPutJson(testPath, "\"test\"");
-        
-        String path = String("/devices/") + String(DEVICE_ID) + String("/active.json");
-        httpPutJson(path, "true");
-        
-        if (!simPublished) {
-            publishSimIdentity();
-            simPublished = true;
-        }
-    }
-    
-    Serial.println("=== Setup Complete ===");
+    publishHeartbeat();
+    publishSimIdentity();
+  }
 }
 
 void loop() {
-    // Update GPS data
-    while (GPSSerial.available() > 0) {
-        if (gps.encode(GPSSerial.read())) {
-            // GPS data updated
-        }
+  ensureNetwork();
+  checkNetworkStatus();
+  while (GPSSerial.available() > 0) {
+    gps.encode(GPSSerial.read());
+  }
+  const unsigned long nowMs = millis();
+  
+  // Check geofence status (every 5 seconds) - NEW GEOFENCING FEATURE
+  if (nowMs - lastGeofenceCheckTime >= 5000) {
+    lastGeofenceCheckTime = nowMs;
+    checkGeofenceStatus();
+  }
+  
+  if (nowMs - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+    lastHeartbeatMs = nowMs;
+    publishHeartbeat();
+    // Also publish last known location if we have a valid fix
+    if (gps.location.isValid()) {
+      publishLocationOnce();
     }
-    
-    // Check for GPS timeout
-    if (millis() > 5000 && gps.charsProcessed() < 10) {
-        Serial.println("No GPS detected. Check wiring.");
-        while(true);
-    }
-    
-    // Check network status
-    checkNetworkStatus();
-    
-    // Poll for commands from app
-    pollCommandsIfDue();
-    
-    // Check geofence status (every 5 seconds)
-    unsigned long now = millis();
-    if (now - lastGeofenceCheckTime >= 5000) {
-        lastGeofenceCheckTime = now;
-        checkGeofenceStatus();
-    }
-    
-    // Publish location if tracking is enabled
-    if (isTrackingContinuous && now - lastTrackTime >= TRACK_INTERVAL_MS) {
-        lastTrackTime = now;
-        if (gps.location.isValid()) {
-            publishLocationOnce();
-            updateGeofenceStatus(); // Legacy status update
-        }
-    }
-    
-    // Publish heartbeat
-    if (now - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS) {
-        lastHeartbeatTime = now;
-        publishHeartbeat();
-    }
-    
-    // Small delay to prevent watchdog issues
-    delay(100);
+  }
+  pollCommandsIfDue();
+  if (isTrackingContinuous && (nowMs - lastTrackPublishMs >= TRACK_INTERVAL_MS)) {
+    lastTrackPublishMs = nowMs;
+    publishLocationOnce();
+  }
+  if (gps.location.isUpdated()) {
+    double lat = gps.location.lat();
+    double lng = gps.location.lng();
+    Serial.printf("GPS: lat=%.6f, lng=%.6f, sats=%u, valid=%d\n",
+                  lat, lng, gps.satellites.value(), gps.location.isValid());
+    updateGeofenceStatus(lat, lng);
+  }
+  // Retry SIM publish every 15s until it succeeds
+  if (netReady && !simPublished && (nowMs - lastSimPublishMs >= 15000)) {
+    lastSimPublishMs = nowMs;
+    publishSimIdentity();
+  }
+  delay(20);
 }
