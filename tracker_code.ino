@@ -162,7 +162,7 @@ void sendAlertToApp(String alertMsg) {
         return;
     }
 
-    String path = "/vehicles/" + DEVICE_ID + "/alerts.json";
+    String path = String("/vehicles/") + String(DEVICE_ID) + String("/alerts.json");
     String jsonData = "\"" + alertMsg + "\"";
     
     http->beginRequest();
@@ -247,7 +247,7 @@ void pollCommandsIfDue() {
             return;
         }
 
-        String path = "/commands/" + DEVICE_ID + ".json";
+        String path = String("/commands/") + String(DEVICE_ID) + String(".json");
         http->beginRequest();
         http->get(path);
         http->endRequest();
@@ -261,9 +261,7 @@ void pollCommandsIfDue() {
                 onCommandReceived(command);
                 
                 // Clear the command after processing
-                http->beginRequest();
-                http->delete(path);
-                http->endRequest();
+                httpDelete(path);
             }
         }
     }
@@ -284,7 +282,7 @@ void updateGeofenceStatus() {
     
     // Update status in Firebase (for app display)
     String status = isOutside ? "outside" : "inside";
-    String path = "/vehicles/" + DEVICE_ID + "/geofence_status.json";
+    String path = String("/vehicles/") + String(DEVICE_ID) + String("/geofence_status.json");
     String jsonData = "{\"status\":\"" + status + "\",\"distance\":" + String(distance, 1) + "}";
     
     httpPutJson(path, jsonData);
@@ -328,7 +326,7 @@ void httpDelete(String path) {
     if (!netReady || http == nullptr) return;
     
     http->beginRequest();
-    http->delete(path);
+    http->del(path);
     http->endRequest();
     
     int statusCode = http->responseStatusCode();
@@ -341,7 +339,7 @@ void httpDelete(String path) {
 void publishHeartbeat() {
     if (!netReady || http == nullptr) return;
     
-    String path = "/devices/" + DEVICE_ID + "/heartbeat.json";
+    String path = String("/devices/") + String(DEVICE_ID) + String("/heartbeat.json");
     String jsonData = "{\"timestamp\":" + String(millis()) + "}";
     httpPutJson(path, jsonData);
 }
@@ -350,7 +348,7 @@ void publishHeartbeat() {
 void publishSimIdentity() {
     if (!netReady || http == nullptr) return;
     
-    String path = "/devices/" + DEVICE_ID + "/sim_info.json";
+    String path = String("/devices/") + String(DEVICE_ID) + String("/sim_info.json");
     String jsonData = "{\"msisdn\":\"" + String(SIM_MSISDN_OVERRIDE) + "\",\"iccid\":\"" + String(SIM_ICCID_OVERRIDE) + "\",\"imei\":\"" + String(IMEI_OVERRIDE) + "\"}";
     httpPutJson(path, jsonData);
 }
@@ -359,7 +357,7 @@ void publishSimIdentity() {
 void publishLocationOnce() {
     if (!netReady || http == nullptr || !gps.location.isValid()) return;
     
-    String path = "/vehicles/" + DEVICE_ID + "/location.json";
+    String path = String("/vehicles/") + String(DEVICE_ID) + String("/location.json");
     String jsonData = "{\"latitude\":" + String(gps.location.lat(), 6) + 
                       ",\"longitude\":" + String(gps.location.lng(), 6) + 
                       ",\"timestamp\":" + String(millis()) + 
@@ -374,7 +372,7 @@ void setImmobilized(bool immobilized) {
     digitalWrite(RELAY_PIN, immobilized ? HIGH : LOW);
     
     // Publish status to Firebase
-    String path = "/vehicles/" + DEVICE_ID + "/immobilized.json";
+    String path = String("/vehicles/") + String(DEVICE_ID) + String("/immobilized.json");
     String jsonData = "{\"status\":" + String(immobilized ? "true" : "false") + "}";
     httpPutJson(path, jsonData);
     
@@ -613,7 +611,7 @@ void setup() {
     
     // Publish initial device status
     if (netReady) {
-        String path = "/devices/" + DEVICE_ID + "/active.json";
+        String path = String("/devices/") + String(DEVICE_ID) + String("/active.json");
         httpPutJson(path, "true");
         
         if (!simPublished) {
