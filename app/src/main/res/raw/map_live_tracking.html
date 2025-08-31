@@ -79,7 +79,21 @@
             }
 
             function metersToPixelsAtLat(m, lat) {
-              return m / metersPerPixelAtLat(lat, map.getZoom());
+              const zoom = map.getZoom();
+              const metersPerPixel = metersPerPixelAtLat(lat, zoom);
+              return m / metersPerPixel;
+            }
+
+            // More accurate distance calculation for geofence
+            function calculateDistance(lat1, lng1, lat2, lng2) {
+              const R = 6371000; // Earth's radius in meters
+              const dLat = (lat2 - lat1) * Math.PI / 180;
+              const dLng = (lng2 - lng1) * Math.PI / 180;
+              const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                       Math.sin(dLng/2) * Math.sin(dLng/2);
+              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+              return R * c;
             }
 
             function ensureMapLoaded(cb) {
@@ -94,6 +108,7 @@
               
               ensureMapLoaded(() => {
                 if (map.getLayer(circleLayerId)) map.removeLayer(circleLayerId);
+                if (map.getLayer(circleLayerId + '-stroke')) map.removeLayer(circleLayerId + '-stroke');
                 if (map.getSource(circleSourceId)) map.removeSource(circleSourceId);
               });
             }
@@ -109,45 +124,73 @@
               const strokeColor = color === 'red' ? '#ff0000' : '#00aa33';
 
               ensureMapLoaded(() => {
+                // Create a proper circle geometry instead of a point
+                const circleGeometry = createCircleGeometry(lat, lng, geofenceRadius);
+                
                 if (!map.getSource(circleSourceId)) {
                   map.addSource(circleSourceId, {
                     type: 'geojson',
-                    data: { type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] } }
+                    data: { type: 'Feature', geometry: circleGeometry }
                   });
                 } else {
-                  map.getSource(circleSourceId).setData({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] } });
+                  map.getSource(circleSourceId).setData({ type: 'Feature', geometry: circleGeometry });
                 }
 
                 if (!map.getLayer(circleLayerId)) {
                   map.addLayer({
                     id: circleLayerId,
-                    type: 'circle',
+                    type: 'fill',
                     source: circleSourceId,
                     paint: {
-                      'circle-radius': metersToPixelsAtLat(geofenceRadius, lat),
-                      'circle-color': currentGeofenceColor,
-                      'circle-opacity': 0.25,
-                      'circle-stroke-color': strokeColor,
-                      'circle-stroke-width': 3
+                      'fill-color': currentGeofenceColor,
+                      'fill-opacity': 0.25
+                    }
+                  });
+                  
+                  // Add stroke layer
+                  map.addLayer({
+                    id: circleLayerId + '-stroke',
+                    type: 'line',
+                    source: circleSourceId,
+                    paint: {
+                      'line-color': strokeColor,
+                      'line-width': 3
                     }
                   });
                 } else {
-                  map.setPaintProperty(circleLayerId, 'circle-radius', metersToPixelsAtLat(geofenceRadius, lat));
-                  map.setPaintProperty(circleLayerId, 'circle-color', currentGeofenceColor);
-                  map.setPaintProperty(circleLayerId, 'circle-stroke-color', strokeColor);
+                  map.setPaintProperty(circleLayerId, 'fill-color', currentGeofenceColor);
+                  map.setPaintProperty(circleLayerId + '-stroke', 'line-color', strokeColor);
                 }
               });
             }
 
+            // Create a proper circle geometry
+            function createCircleGeometry(centerLat, centerLng, radiusMeters) {
+              const points = 64; // Number of points to create the circle
+              const coordinates = [];
+              
+              for (let i = 0; i < points; i++) {
+                const angle = (i / points) * 2 * Math.PI;
+                const lat = centerLat + (radiusMeters / 111320) * Math.cos(angle);
+                const lng = centerLng + (radiusMeters / (111320 * Math.cos(centerLat * Math.PI / 180))) * Math.sin(angle);
+                coordinates.push([lng, lat]);
+              }
+              
+              // Close the circle
+              coordinates.push(coordinates[0]);
+              
+              return {
+                type: 'Polygon',
+                coordinates: [coordinates]
+              };
+            }
+
             function setGeofenceRadius(radius) {
               geofenceRadius = radius;
-              ensureMapLoaded(() => {
-                if (map.getLayer(circleLayerId) && map.getSource(circleSourceId)) {
-                  const center = map.getSource(circleSourceId)._data.geometry.coordinates;
-                  const lat = center[1];
-                  map.setPaintProperty(circleLayerId, 'circle-radius', metersToPixelsAtLat(geofenceRadius, lat));
-                }
-              });
+              if (geofenceEnabled && geofenceCenter) {
+                // Redraw the circle with new radius
+                drawGeofenceCircle(geofenceCenter[0], geofenceCenter[1], radius, currentGeofenceColor === '#ff0000' ? 'red' : 'green');
+              }
             }
 
             function updateGeofenceStatus(isInside, distance = null) {
@@ -216,7 +259,10 @@
               // Update geofence status if geofence is enabled
               if (geofenceEnabled && geofenceCenter) {
                 const distance = calculateDistance(geofenceCenter[0], geofenceCenter[1], lat, lng);
-                updateGeofenceStatus(isInside, distance);
+                const actualIsInside = distance <= geofenceRadius;
+                
+                // Use the actual calculated status instead of the passed parameter
+                updateGeofenceStatus(actualIsInside, distance);
               }
               
               if (isFirstUpdate) { 
@@ -225,24 +271,7 @@
               }
             }
 
-            // Calculate distance between two points in meters
-            function calculateDistance(lat1, lng1, lat2, lng2) {
-              const R = 6371000; // Earth's radius in meters
-              const dLat = (lat2 - lat1) * Math.PI / 180;
-              const dLng = (lng2 - lng1) * Math.PI / 180;
-              const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                       Math.sin(dLng/2) * Math.sin(dLng/2);
-              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-              return R * c;
-            }
-
-            // Keep circle size correct while zooming
-            map.on('zoom', () => {
-              if (geofenceEnabled && geofenceCenter) {
-                setGeofenceRadius(geofenceRadius);
-              }
-            });
+            // No need for zoom listener with polygon-based circles
 
             // Expose functions for Android
             window.updateMarkerPosition = updateMarkerPosition;
