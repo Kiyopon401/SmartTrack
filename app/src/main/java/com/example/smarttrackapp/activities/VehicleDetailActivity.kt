@@ -222,57 +222,37 @@ class VehicleDetailActivity : AppCompatActivity() {
             .addValueEventListener(object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     try {
-                    lastFirebaseUpdateTime = System.currentTimeMillis()
+                        lastFirebaseUpdateTime = System.currentTimeMillis()
                         // Defensive: check if snapshot exists and is not too large
                         if (!snapshot.exists() || snapshot.childrenCount > 100) {
                             Log.w(TAG, "Skipping location update: invalid or too many children in snapshot")
                             return
                         }
-                    val lat = snapshot.child("latitude").getValue(Double::class.java)
-                    val lng = snapshot.child("longitude").getValue(Double::class.java)
-                    val timestamp = snapshot.child("timestamp").getValue(Long::class.java)
+                        val lat = snapshot.child("latitude").getValue(Double::class.java)
+                        val lng = snapshot.child("longitude").getValue(Double::class.java)
+                        val timestamp = snapshot.child("timestamp").getValue(Long::class.java)
                         Log.d(TAG, "onDataChange: lat=$lat, lng=$lng, timestamp=$timestamp for deviceId=$deviceId")
-                    if (lat != null && lng != null && timestamp != null) {
+                        if (lat != null && lng != null && timestamp != null) {
                             // Always save trip points (no throttling for data)
                             viewModel.saveTripPoints(currentVehicle.id, listOf(Pair(lat, lng)))
                             // Throttle UI updates to prevent lag/crashes
                             val now = System.currentTimeMillis()
                             if (now - lastUIUpdateTime >= UI_UPDATE_THROTTLE_MS) {
                                 lastUIUpdateTime = now
-                        runOnUiThread {
+                                runOnUiThread {
                                     throttledMapUpdate {
-                            // Update map marker with tracker location
-                            MapUtils.updateMapLocation(
-                                binding.mapWebView,
-                                lat, lng,
-                                currentVehicle.nickname,
-                                isInsideGeofence(lat, lng)
-                            )
-                            
-                            // Update geofence status if enabled
-                            if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
-                                val results = FloatArray(1)
-                                Location.distanceBetween(geofenceLat!!, geofenceLng!!, lat, lng, results)
-                                val isOutside = results[0] > geofenceRadiusMeters
-                                val color = if (isOutside) "red" else "green"
-                                MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-                                
-                                if (isOutside && !hasPlayedAlert) {
-                                    val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                                    binding.geofenceAlert.text = message
-                                    binding.geofenceAlert.visibility = View.VISIBLE
-                                    hasPlayedAlert = true
-                                } else if (!isOutside) {
-                                    binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                                    binding.geofenceAlert.visibility = View.VISIBLE
-                                    hasPlayedAlert = false
-                                }
-                            }
-                            
-                            // Update the location above the map to match the tracked device
-                            binding.lastLocation.text = "Lat: %.6f, Lng: %.6f".format(lat, lng)
-                            isFirebaseConnected = true
-                            updateConnectionStatus()
+                                        // Update map marker with tracker location
+                                        MapUtils.updateMapLocation(
+                                            binding.mapWebView,
+                                            lat, lng,
+                                            currentVehicle.nickname,
+                                            true // Always show as inside since Arduino handles geofence
+                                        )
+
+                                        // Update the location above the map to match the tracked device
+                                        binding.lastLocation.text = "Lat: %.6f, Lng: %.6f".format(lat, lng)
+                                        isFirebaseConnected = true
+                                        updateConnectionStatus()
                                     }
                                 }
                             }
@@ -286,6 +266,38 @@ class VehicleDetailActivity : AppCompatActivity() {
                     Log.e(TAG, "Location listener cancelled", error.toException())
                     isFirebaseConnected = false
                     updateConnectionStatus()
+                }
+            })
+
+        // NEW: Listener for Arduino geofence alerts
+        firebaseDb.reference.child("vehicles").child(deviceId).child("alerts")
+            .addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    val alert = snapshot.getValue(String::class.java)
+                    if (alert != null && alert.startsWith("GEOFENCE_ALERT:")) {
+                        // Clear the alert after reading
+                        firebaseDb.reference.child("vehicles").child(deviceId).child("alerts").removeValue()
+
+                        // Process the alert
+                        if (alert.contains("OUTSIDE")) {
+                            val distance = alert.split(":")[2].replace("m", "")
+                            val message = "🚨 Vehicle left geofence area! Distance: ${distance}m"
+                            binding.geofenceAlert.text = message
+                            binding.geofenceAlert.visibility = View.VISIBLE
+                            Toast.makeText(this@VehicleDetailActivity, message, Toast.LENGTH_LONG).show()
+                            Log.w(TAG, "Geofence alert: $message")
+                        } else if (alert.contains("INSIDE")) {
+                            val distance = alert.split(":")[2].replace("m", "")
+                            val message = "✅ Vehicle returned to geofence area. Distance: ${distance}m"
+                            binding.geofenceAlert.text = message
+                            binding.geofenceAlert.visibility = View.VISIBLE
+                            Log.d(TAG, "Geofence status: $message")
+                        }
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {
+                    Log.e(TAG, "Alert listener cancelled", error.toException())
                 }
             })
     }
@@ -388,17 +400,17 @@ class VehicleDetailActivity : AppCompatActivity() {
 
         binding.btnStartTracking.setOnClickListener {
             if (!isContinuousTracking) {
-            isContinuousTracking = true
-            sendCommandToCompanion("START_TRACKING")
-            Toast.makeText(this, "Continuous tracking started", Toast.LENGTH_SHORT).show()
+                isContinuousTracking = true
+                sendCommandToCompanion("START_TRACKING")
+                Toast.makeText(this, "Continuous tracking started", Toast.LENGTH_SHORT).show()
                 updateTrackingButtons()
             }
         }
 
         binding.btnStopTracking.setOnClickListener {
             if (isContinuousTracking) {
-            isContinuousTracking = false
-            sendCommandToCompanion("STOP")
+                isContinuousTracking = false
+                sendCommandToCompanion("STOP")
                 Toast.makeText(this, "Tracking stopped", Toast.LENGTH_SHORT).show()
                 updateTrackingButtons()
             }
@@ -415,15 +427,15 @@ class VehicleDetailActivity : AppCompatActivity() {
                 // Show loading state
                 binding.btnPairDevice.text = "Searching..."
                 binding.btnPairDevice.isEnabled = false
-                
+
                 // Fetch device IDs from Firebase and show dialog
                 FirebaseManager.fetchAvailableDeviceIds { deviceIds ->
                     runOnUiThread {
                         binding.btnPairDevice.text = "Pair DeviceTrackerCompanion"
                         binding.btnPairDevice.isEnabled = true
-                        
+
                         Log.d(TAG, "Found ${deviceIds.size} available devices: $deviceIds")
-                        
+
                         if (deviceIds.isEmpty()) {
                             showNoDevicesDialog()
                             return@runOnUiThread
@@ -431,7 +443,7 @@ class VehicleDetailActivity : AppCompatActivity() {
                         showDeviceSelectionDialog(deviceIds)
                     }
                 }
-                
+
                 // Add timeout to prevent hanging
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (binding.btnPairDevice.text == "Searching...") {
@@ -475,7 +487,7 @@ class VehicleDetailActivity : AppCompatActivity() {
                 geofenceRadiusMeters = radius.toDouble()
                 binding.geofenceRadiusValue.text = "$radius m"
                 MapUtils.updateGeofenceRadius(binding.mapWebView, geofenceRadiusMeters)
-                
+
                 // Send radius update command to tracker if geofence is enabled
                 if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
                     val command = "GEOFENCE_RADIUS:${geofenceRadiusMeters.toInt()}"
@@ -511,16 +523,16 @@ class VehicleDetailActivity : AppCompatActivity() {
     private fun clearGeofenceState() {
         // Remove geofence circle from map
         MapUtils.removeGeofenceCircle(binding.mapWebView)
-        
+
         // Clear geofence variables
         geofenceLat = null
         geofenceLng = null
         hasPlayedAlert = false
-        
+
         // Clear any existing alert messages
         binding.geofenceAlert.text = ""
         binding.geofenceAlert.visibility = View.GONE
-        
+
         // Send clear command to tracker
         clearGeofenceCommandToTracker()
     }
@@ -537,13 +549,13 @@ class VehicleDetailActivity : AppCompatActivity() {
                 .get().addOnSuccessListener { snapshot ->
                     val lat = snapshot.child("latitude").getValue(Double::class.java)
                     val lng = snapshot.child("longitude").getValue(Double::class.java)
-                    
-                                        if (lat != null && lng != null) {
+
+                    if (lat != null && lng != null) {
                         // Use tracker's location for geofence center
                         geofenceLat = lat
                         geofenceLng = lng
-                        
-                        // Draw geofence circle at tracker's location
+
+                        // Draw geofence circle at tracker's location (visual only)
                         MapUtils.drawGeofenceCircle(
                             binding.mapWebView,
                             geofenceLat!!,
@@ -551,18 +563,15 @@ class VehicleDetailActivity : AppCompatActivity() {
                             geofenceRadiusMeters
                         )
 
-                        // Send geofence command to tracker device
+                        // Send geofence command to Arduino tracker
                         sendGeofenceCommandToTracker()
-
-                        // Check geofence status immediately using tracker location
-                        checkGeofenceStatus(lat, lng)
 
                         Toast.makeText(
                             this,
                             "Geofence set at tracker location (${String.format("%.6f", lat)}, ${String.format("%.6f", lng)})",
                             Toast.LENGTH_SHORT
                         ).show()
-                        
+
                         Log.d(TAG, "Geofence set at tracker location: lat=$lat, lng=$lng, radius=$geofenceRadiusMeters")
                     } else {
                         // Fallback to phone location if no tracker data
@@ -590,13 +599,10 @@ class VehicleDetailActivity : AppCompatActivity() {
                         geofenceLng!!,
                         geofenceRadiusMeters
                     )
-                    
+
                     // Send geofence command to tracker device
                     sendGeofenceCommandToTracker()
-                    
-                    // Check geofence status
-                    checkGeofenceStatus(location.latitude, location.longitude)
-                    
+
                     Toast.makeText(
                         this,
                         "Geofence set at phone location (no tracker data)",
@@ -625,33 +631,6 @@ class VehicleDetailActivity : AppCompatActivity() {
                 Toast.LENGTH_SHORT
             ).show()
             binding.switchGeofence.isChecked = false
-        }
-    }
-
-    private fun checkGeofenceStatus(trackerLat: Double, trackerLng: Double) {
-        try {
-            // Use the tracker's location to check geofence status, not phone location
-            val results = FloatArray(1)
-            Location.distanceBetween(
-                geofenceLat!!, geofenceLng!!,
-                trackerLat, trackerLng,
-                results
-            )
-            val isOutside = results[0] > geofenceRadiusMeters
-            val color = if (isOutside) "red" else "green"
-            MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-            if (isOutside) {
-                val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                Log.w(TAG, "Geofence alarm triggered (setup): $message")
-                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                binding.geofenceAlert.text = message
-                binding.geofenceAlert.visibility = View.VISIBLE
-            } else {
-                binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                binding.geofenceAlert.visibility = View.VISIBLE
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in geofence status check", e)
         }
     }
 
@@ -773,45 +752,17 @@ class VehicleDetailActivity : AppCompatActivity() {
         // Update UI on main thread
         runOnUiThread {
             throttledMapUpdate {
-            binding.lastLocation.text = "Lat: ${"%.6f".format(lat)}, Lng: ${"%.6f".format(lng)}"
+                binding.lastLocation.text = "Lat: ${"%.6f".format(lat)}, Lng: ${"%.6f".format(lng)}"
 
-            // Check geofence status
-            try {
-                if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
-                    val results = FloatArray(1)
-                    Location.distanceBetween(geofenceLat!!, geofenceLng!!, lat, lng, results)
-                    val isOutside = results[0] > geofenceRadiusMeters
-                    val color = if (isOutside) "red" else "green"
-                    MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-                    if (isOutside && !hasPlayedAlert) {
-                        val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                        binding.geofenceAlert.text = message
-                        binding.geofenceAlert.visibility = View.VISIBLE
-                        hasPlayedAlert = true
-                        // Play alert sound or vibration here if needed
-                    } else if (!isOutside) {
-                        binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                        binding.geofenceAlert.visibility = View.VISIBLE
-                        hasPlayedAlert = false
-                    }
-                } else {
-                    // Clear status when geofence is disabled
-                    binding.geofenceAlert.text = ""
-                    binding.geofenceAlert.visibility = View.GONE
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error checking geofence status: ${e.message}")
-            }
-
-            // Update map marker with phone location (this is for phone tracking, not tracker)
-            val isInsideGeofence = isInsideGeofence(lat, lng)
-            MapUtils.updateMapLocationDebounced(
-                binding.mapWebView,
-                lat,
-                lng,
-                currentVehicle.nickname,
-                isInsideGeofence
-            )
+                // Update map marker with phone location (this is for phone tracking, not tracker)
+                val isInsideGeofence = isInsideGeofence(lat, lng)
+                MapUtils.updateMapLocationDebounced(
+                    binding.mapWebView,
+                    lat,
+                    lng,
+                    currentVehicle.nickname,
+                    isInsideGeofence
+                )
             }
         }
 
@@ -927,18 +878,18 @@ class VehicleDetailActivity : AppCompatActivity() {
 
     private fun showDeviceSelectionDialog(deviceIds: List<String>) {
         Log.d(TAG, "Showing device selection dialog for ${deviceIds.size} devices")
-        
+
         // Fetch device info for each device
         val deviceInfoList = mutableListOf<Pair<String, Map<String, Any>?>>()
         var loadedCount = 0
-        
+
         deviceIds.forEach { deviceId ->
             Log.d(TAG, "Fetching info for device: $deviceId")
             FirebaseManager.fetchDeviceInfo(deviceId) { deviceInfo ->
                 Log.d(TAG, "Received info for device $deviceId: $deviceInfo")
                 deviceInfoList.add(deviceId to deviceInfo)
                 loadedCount++
-                
+
                 if (loadedCount == deviceIds.size) {
                     runOnUiThread {
                         Log.d(TAG, "All device info loaded, showing dialog")
@@ -955,12 +906,12 @@ class VehicleDetailActivity : AppCompatActivity() {
             val manufacturer = info?.get("manufacturer") as? String ?: "Unknown"
             val lastSeen = info?.get("last_seen") as? Long
             val status = if (info?.get("active") == true) "Online" else "Offline"
-            
+
             val lastSeenText = if (lastSeen != null) {
                 val minutesAgo = (System.currentTimeMillis() - lastSeen) / 60000
                 "Last seen: ${if (minutesAgo < 1) "Just now" else "$minutesAgo min ago"}"
             } else "Unknown"
-            
+
             "$manufacturer $model\n$deviceId\n$status • $lastSeenText"
         }.toTypedArray()
 
@@ -977,10 +928,10 @@ class VehicleDetailActivity : AppCompatActivity() {
     private fun pairWithDevice(deviceId: String) {
         lifecycleScope.launch {
             viewModel.updateDeviceId(currentVehicle.id, deviceId)
-            
+
             // Send pairing command to the companion device
             FirebaseManager.sendCommand(deviceId, "PAIR:${currentVehicle.id}")
-            
+
             Toast.makeText(
                 this@VehicleDetailActivity,
                 "Paired with device: $deviceId",

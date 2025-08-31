@@ -92,12 +92,15 @@ String simMsisdn = "";         // SIM phone number (if available)
 String simIccid  = "";         // SIM ICCID
 String deviceImei = "";        // Modem IMEI
 
+// Geofence structure with enhanced features
 struct Geofence {
   bool enabled = false;
   double centerLat = 0.0;
   double centerLng = 0.0;
-  double radiusMeters = 0.0;
+  double radiusMeters = 100.0;
   bool lastOutside = false;  // to detect transitions
+  unsigned long lastAlertTime = 0;
+  const unsigned long ALERT_COOLDOWN_MS = 30000; // 30 seconds between alerts
 } geofence;
 
 unsigned long lastTrackPublishMs = 0;
@@ -295,31 +298,64 @@ void publishLocationOnce() {
   }
 }
 
+// =========================
+// ====== GEOFENCE FUNCTIONS =
+// =========================
+void checkGeofenceStatus() {
+  if (!geofence.enabled || !gps.location.isValid()) return;
+  
+  double lat = gps.location.lat();
+  double lng = gps.location.lng();
+  double distance = distanceMeters(lat, lng, geofence.centerLat, geofence.centerLng);
+  
+  bool isOutside = distance > geofence.radiusMeters;
+  
+  // Only alert on state change or after cooldown
+  if (isOutside != geofence.lastOutside || 
+      (isOutside && (millis() - geofence.lastAlertTime) > geofence.ALERT_COOLDOWN_MS)) {
+    
+    geofence.lastOutside = isOutside;
+    
+    if (isOutside) {
+      geofence.lastAlertTime = millis();
+      
+      // Send immediate alert to app
+      String alertMsg = "GEOFENCE_ALERT:OUTSIDE:" + String(distance, 2) + "m";
+      sendAlertToApp(alertMsg);
+      
+      // Activate buzzer for immediate feedback
+      toneBuzzer(1500);
+      
+      Serial.printf("GEOFENCE ALERT: Vehicle outside area! Distance: %.2fm\n", distance);
+    } else {
+      String alertMsg = "GEOFENCE_ALERT:INSIDE:" + String(distance, 2) + "m";
+      sendAlertToApp(alertMsg);
+      Serial.printf("GEOFENCE: Vehicle returned to area. Distance: %.2fm\n", distance);
+    }
+  }
+}
+
+void sendAlertToApp(String alertMsg) {
+  String alertData = "\"" + alertMsg + "\"";
+  const String targetVid = vehicleIdForPublish();
+  if (httpPutJson(pathVehicleRootFor(targetVid) + "/alerts.json", alertData)) {
+    Serial.println("Alert sent: " + alertMsg);
+  } else {
+    Serial.println("Failed to send alert");
+  }
+}
+
 void updateGeofenceStatus(double lat, double lng) {
   if (!netReady || !geofence.enabled) return;
-  
   double d = distanceMeters(lat, lng, geofence.centerLat, geofence.centerLng);
   bool isOutside = d > geofence.radiusMeters;
   String status = isOutside ? "outside" : "inside";
-  
-  // Only update if there's a transition or if this is the first check
   if (isOutside != geofence.lastOutside) {
     geofence.lastOutside = isOutside;
     const String targetVid = vehicleIdForPublish();
-    
-    // Update the geofence status in Firebase
-    String statusJson = String("\"") + status + "\"";
-    if (httpPutJson(pathVehicleRootFor(targetVid) + "/geofence/status.json", statusJson)) {
-      Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
-    } else {
-      Serial.println(F("Failed to update geofence status"));
-    }
-    
-    // Trigger buzzer if vehicle left the geofence
-    if (isOutside) {
-      toneBuzzer(150);
-      Serial.println(F("🚨 Geofence alert: Vehicle left virtual area!"));
-    }
+    httpPutJson(pathVehicleRootFor(targetVid) + "/geofence/status.json", String("\"") + status + "\"");
+    Serial.printf("Geofence status updated: %s (%.2fm)\n", status.c_str(), d);
+    if (isOutside) toneBuzzer(150);
   }
 }
 
@@ -362,6 +398,7 @@ void onCommandReceived(const String &cmdRaw) {
     String json = String("{\"pairedVehicleId\":\"") + pairedVehicleId + "\"}";
     httpPutJson(pathDeviceRoot() + ".json", json);
   } else if (cmd.startsWith("GEOFENCE_SET:")) {
+    // Format: GEOFENCE_SET:lat,lng,radius
     String args = cmd.substring(String("GEOFENCE_SET:").length());
     args.trim();
     int c1 = args.indexOf(',');
@@ -748,6 +785,14 @@ void loop() {
                   lat, lng, gps.satellites.value(), gps.location.isValid());
     updateGeofenceStatus(lat, lng);
   }
+  
+  // Check geofence status every 5 seconds
+  static unsigned long lastGeofenceCheck = 0;
+  if (nowMs - lastGeofenceCheck >= 5000) {
+    lastGeofenceCheck = nowMs;
+    checkGeofenceStatus();
+  }
+  
   // Retry SIM publish every 15s until it succeeds
   if (netReady && !simPublished && (nowMs - lastSimPublishMs >= 15000)) {
     lastSimPublishMs = nowMs;
