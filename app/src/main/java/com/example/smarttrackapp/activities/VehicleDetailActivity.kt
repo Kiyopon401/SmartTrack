@@ -241,14 +241,36 @@ class VehicleDetailActivity : AppCompatActivity() {
                                 lastUIUpdateTime = now
                         runOnUiThread {
                                     throttledMapUpdate {
+                            // Update map marker with tracker location
                             MapUtils.updateMapLocation(
                                 binding.mapWebView,
                                 lat, lng,
                                 currentVehicle.nickname,
-                                true
+                                isInsideGeofence(lat, lng)
                             )
-                                        // Update the location above the map to match the tracked device
-                                        binding.lastLocation.text = "Lat: %.6f, Lng: %.6f".format(lat, lng)
+                            
+                            // Update geofence status if enabled
+                            if (isGeofenceEnabled && geofenceLat != null && geofenceLng != null) {
+                                val results = FloatArray(1)
+                                Location.distanceBetween(geofenceLat!!, geofenceLng!!, lat, lng, results)
+                                val isOutside = results[0] > geofenceRadiusMeters
+                                val color = if (isOutside) "red" else "green"
+                                MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
+                                
+                                if (isOutside && !hasPlayedAlert) {
+                                    val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
+                                    binding.geofenceAlert.text = message
+                                    binding.geofenceAlert.visibility = View.VISIBLE
+                                    hasPlayedAlert = true
+                                } else if (!isOutside) {
+                                    binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
+                                    binding.geofenceAlert.visibility = View.VISIBLE
+                                    hasPlayedAlert = false
+                                }
+                            }
+                            
+                            // Update the location above the map to match the tracked device
+                            binding.lastLocation.text = "Lat: %.6f, Lng: %.6f".format(lat, lng)
                             isFirebaseConnected = true
                             updateConnectionStatus()
                                     }
@@ -516,28 +538,32 @@ class VehicleDetailActivity : AppCompatActivity() {
                     val lat = snapshot.child("latitude").getValue(Double::class.java)
                     val lng = snapshot.child("longitude").getValue(Double::class.java)
                     
-                    if (lat != null && lng != null) {
+                                        if (lat != null && lng != null) {
                         // Use tracker's location for geofence center
                         geofenceLat = lat
                         geofenceLng = lng
+                        
+                        // Draw geofence circle at tracker's location
                         MapUtils.drawGeofenceCircle(
                             binding.mapWebView,
                             geofenceLat!!,
                             geofenceLng!!,
                             geofenceRadiusMeters
                         )
-                        
+
                         // Send geofence command to tracker device
                         sendGeofenceCommandToTracker()
-                        
-                        // Check geofence status immediately
+
+                        // Check geofence status immediately using tracker location
                         checkGeofenceStatus(lat, lng)
-                        
+
                         Toast.makeText(
                             this,
-                            "Geofence set at tracker location",
+                            "Geofence set at tracker location (${String.format("%.6f", lat)}, ${String.format("%.6f", lng)})",
                             Toast.LENGTH_SHORT
                         ).show()
+                        
+                        Log.d(TAG, "Geofence set at tracker location: lat=$lat, lng=$lng, radius=$geofenceRadiusMeters")
                     } else {
                         // Fallback to phone location if no tracker data
                         usePhoneLocationForGeofence()
@@ -604,26 +630,25 @@ class VehicleDetailActivity : AppCompatActivity() {
 
     private fun checkGeofenceStatus(trackerLat: Double, trackerLng: Double) {
         try {
-            lastLocation?.let { loc ->
-                val results = FloatArray(1)
-                Location.distanceBetween(
-                    geofenceLat!!, geofenceLng!!,
-                    loc.latitude, loc.longitude,
-                    results
-                )
-                val isOutside = results[0] > geofenceRadiusMeters
-                val color = if (isOutside) "red" else "green"
-                MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
-                if (isOutside) {
-                    val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
-                    Log.w(TAG, "Geofence alarm triggered (setup): $message")
-                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                    binding.geofenceAlert.text = message
-                    binding.geofenceAlert.visibility = View.VISIBLE
-                } else {
-                    binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
-                    binding.geofenceAlert.visibility = View.VISIBLE
-                }
+            // Use the tracker's location to check geofence status, not phone location
+            val results = FloatArray(1)
+            Location.distanceBetween(
+                geofenceLat!!, geofenceLng!!,
+                trackerLat, trackerLng,
+                results
+            )
+            val isOutside = results[0] > geofenceRadiusMeters
+            val color = if (isOutside) "red" else "green"
+            MapUtils.drawGeofenceCircle(binding.mapWebView, geofenceLat!!, geofenceLng!!, geofenceRadiusMeters, color)
+            if (isOutside) {
+                val message = "🚨 Alert: Your vehicle '${currentVehicle.nickname}' has left the virtual area!"
+                Log.w(TAG, "Geofence alarm triggered (setup): $message")
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                binding.geofenceAlert.text = message
+                binding.geofenceAlert.visibility = View.VISIBLE
+            } else {
+                binding.geofenceAlert.text = "✅ Vehicle is within virtual area"
+                binding.geofenceAlert.visibility = View.VISIBLE
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in geofence status check", e)
@@ -778,6 +803,7 @@ class VehicleDetailActivity : AppCompatActivity() {
                 Log.e(TAG, "Error checking geofence status: ${e.message}")
             }
 
+            // Update map marker with phone location (this is for phone tracking, not tracker)
             val isInsideGeofence = isInsideGeofence(lat, lng)
             MapUtils.updateMapLocationDebounced(
                 binding.mapWebView,
