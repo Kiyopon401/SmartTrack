@@ -9,10 +9,26 @@
         <style>
             html, body, #map { height: 100%; margin: 0; padding: 0; overflow: hidden; }
             .marker-icon { width: 40px; height: 40px; }
+            .geofence-status {
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                background: rgba(255, 255, 255, 0.9);
+                padding: 8px 12px;
+                border-radius: 6px;
+                font-family: Arial, sans-serif;
+                font-size: 12px;
+                font-weight: bold;
+                z-index: 1000;
+                display: none;
+            }
+            .status-inside { color: #00aa33; }
+            .status-outside { color: #ff0000; }
         </style>
     </head>
     <body>
         <div id="map"></div>
+        <div id="geofenceStatus" class="geofence-status"></div>
         <button id="followBtn" style="position:absolute;top:10px;right:10px;z-index:1000;display:none;">Follow tracking movement of the map</button>
         <script>
             mapboxgl.accessToken = 'pk.eyJ1IjoibmVsMDAzIiwiYSI6ImNtNzhiN2VodzB0ZGIybHExeWo3bHdweXMifQ.u9hzJr3DhSKNkv1pkH0qRQ';
@@ -41,6 +57,8 @@
             let isFirstUpdate = true;
             let geofenceRadius = 100; // meters
             let currentGeofenceColor = '#00ff55'; // Default green
+            let geofenceEnabled = false;
+            let geofenceCenter = null;
 
             const circleSourceId = 'geofence-src';
             const circleLayerId  = 'geofence-layer';
@@ -48,12 +66,18 @@
             const pathLayerId    = 'path-layer';
 
             const followBtn = document.getElementById('followBtn');
-            function setFollowing(follow) { isFollowing = follow; followBtn.style.display = follow ? 'none' : 'block'; }
+            const geofenceStatusEl = document.getElementById('geofenceStatus');
+
+            function setFollowing(follow) { 
+                isFollowing = follow; 
+                followBtn.style.display = follow ? 'none' : 'block'; 
+            }
 
             function metersPerPixelAtLat(lat, zoom) {
               const earthCircumference = 40075016.686; // meters
               return earthCircumference * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom + 8);
             }
+
             function metersToPixelsAtLat(m, lat) {
               return m / metersPerPixelAtLat(lat, map.getZoom());
             }
@@ -64,14 +88,23 @@
             }
 
             function clearGeofence() {
+              geofenceEnabled = false;
+              geofenceCenter = null;
+              geofenceStatusEl.style.display = 'none';
+              
               ensureMapLoaded(() => {
                 if (map.getLayer(circleLayerId)) map.removeLayer(circleLayerId);
                 if (map.getSource(circleSourceId)) map.removeSource(circleSourceId);
               });
             }
 
-            function drawGeofenceCircle(lat, lng, color = 'green') {
-              console.log('Drawing geofence circle at:', lat, lng, 'with color:', color);
+            function drawGeofenceCircle(lat, lng, radius = null, color = 'green') {
+              console.log('Drawing geofence circle at:', lat, lng, 'radius:', radius || geofenceRadius, 'color:', color);
+              
+              geofenceEnabled = true;
+              geofenceCenter = [lat, lng];
+              if (radius) geofenceRadius = radius;
+              
               currentGeofenceColor = color === 'red' ? '#ff0000' : '#00ff55';
               const strokeColor = color === 'red' ? '#ff0000' : '#00aa33';
 
@@ -117,6 +150,29 @@
               });
             }
 
+            function updateGeofenceStatus(isInside, distance = null) {
+              if (!geofenceEnabled) {
+                geofenceStatusEl.style.display = 'none';
+                return;
+              }
+
+              geofenceStatusEl.style.display = 'block';
+              geofenceStatusEl.className = 'geofence-status ' + (isInside ? 'status-inside' : 'status-outside');
+              
+              let statusText = isInside ? '✅ Inside geofence' : '🚨 Outside geofence';
+              if (distance !== null) {
+                statusText += ` (${Math.round(distance)}m)`;
+              }
+              
+              geofenceStatusEl.textContent = statusText;
+
+              // Update geofence circle color based on status
+              const color = isInside ? 'green' : 'red';
+              if (geofenceCenter) {
+                drawGeofenceCircle(geofenceCenter[0], geofenceCenter[1], geofenceRadius, color);
+              }
+            }
+
             function drawPath(coords) {
               ensureMapLoaded(() => {
                 if (map.getLayer(pathLayerId)) map.removeLayer(pathLayerId);
@@ -156,11 +212,37 @@
 
             function updateMarkerPosition(lat, lng, isInside = true) {
               trackerMarker.setLngLat([lng, lat]);
-              if (isFirstUpdate) { map.setCenter([lng, lat]); isFirstUpdate = false; }
+              
+              // Update geofence status if geofence is enabled
+              if (geofenceEnabled && geofenceCenter) {
+                const distance = calculateDistance(geofenceCenter[0], geofenceCenter[1], lat, lng);
+                updateGeofenceStatus(isInside, distance);
+              }
+              
+              if (isFirstUpdate) { 
+                map.setCenter([lng, lat]); 
+                isFirstUpdate = false; 
+              }
+            }
+
+            // Calculate distance between two points in meters
+            function calculateDistance(lat1, lng1, lat2, lng2) {
+              const R = 6371000; // Earth's radius in meters
+              const dLat = (lat2 - lat1) * Math.PI / 180;
+              const dLng = (lng2 - lng1) * Math.PI / 180;
+              const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                       Math.sin(dLng/2) * Math.sin(dLng/2);
+              const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+              return R * c;
             }
 
             // Keep circle size correct while zooming
-            map.on('zoom', () => setGeofenceRadius(geofenceRadius));
+            map.on('zoom', () => {
+              if (geofenceEnabled && geofenceCenter) {
+                setGeofenceRadius(geofenceRadius);
+              }
+            });
 
             // Expose functions for Android
             window.updateMarkerPosition = updateMarkerPosition;
@@ -170,6 +252,7 @@
             window.drawPath = drawPath;
             window.updateDevicePosition = updateDevicePosition;
             window.setPaired = setPaired;
+            window.updateGeofenceStatus = updateGeofenceStatus;
 
             // Optional initial draw (won't interfere with Android calls)
             window.onload = function() {
