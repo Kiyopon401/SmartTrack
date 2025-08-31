@@ -41,7 +41,10 @@
               if (geofenceCircle) {
                 geofenceCircle.setStyle({
                   color: isInside ? "green" : "red",
-                  fillColor: isInside ? "#0f0" : "#f00",
+                  fillColor: isInside ? "#00ff00" : "#ff0000",
+                  fillOpacity: 0.2,
+                  weight: 4,
+                  dashArray: "10, 10"
                 });
               }
 
@@ -73,14 +76,25 @@
               }
             }
 
+            function removeGeofenceCircle() {
+              clearGeofence();
+            }
+
             function drawGeofenceCircle(lat, lng, color = "green") {
               clearGeofence();
               geofenceCircle = L.circle([lat, lng], {
                 color: color,
-                fillColor: color === "red" ? "#f00" : "#0f3",
+                fillColor: color === "red" ? "#ff0000" : "#00ff00",
                 fillOpacity: 0.2,
+                weight: 4,
                 radius: geofenceRadius,
+                dashArray: "10, 10"
               }).addTo(map);
+              
+              // Ensure the geofence circle is visible by fitting bounds
+              if (geofenceCircle) {
+                map.fitBounds(geofenceCircle.getBounds());
+              }
             }
 
             // Use Geolocation API to get current position on page load
