@@ -34,6 +34,7 @@
 // Firebase RTDB REST host (no protocol, no trailing slash)
 // Example: "your-project-id-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define DATABASE_HOST    "smarttrackbackup-d19e8-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define DATABASE_PATH    "/.json"
 
 // Optional database secret or auth token. If empty, no auth query is appended.
 // Prefer using a scoped custom token or rules restricted to 
@@ -290,7 +291,15 @@ void updateGeofenceStatus() {
 
 // Helper function to make HTTP PUT requests with JSON
 void httpPutJson(String path, String jsonData) {
-    if (!netReady || http == nullptr) return;
+    if (!netReady || http == nullptr) {
+        Serial.println("Network not ready for HTTP PUT");
+        return;
+    }
+    
+    Serial.print("Sending PUT to: ");
+    Serial.println(path);
+    Serial.print("Data: ");
+    Serial.println(jsonData);
     
     http->beginRequest();
     http->put(path);
@@ -301,7 +310,18 @@ void httpPutJson(String path, String jsonData) {
     http->endRequest();
     
     int statusCode = http->responseStatusCode();
-    if (statusCode != 200) {
+    Serial.print("HTTP Status: ");
+    Serial.println(statusCode);
+    
+    if (statusCode == 200) {
+        Serial.println("HTTP PUT successful");
+    } else if (statusCode == -3) {
+        Serial.println("HTTP PUT failed: Connection error (-3)");
+        Serial.println("Check WiFi connection and Firebase host");
+        // Try to reconnect
+        netReady = false;
+        ensureNetwork();
+    } else {
         Serial.println("HTTP PUT failed: " + String(statusCode));
     }
 }
@@ -504,9 +524,11 @@ bool ensureNetwork() {
     if (connectWiFi()) {
         netClient = &wifiClient;
         http = new HttpClient(*netClient, DATABASE_HOST, 443);
-        http->setHttpResponseTimeout(10000);
+        http->setHttpResponseTimeout(30000); // Increased timeout
         netReady = true;
         Serial.println("Network ready (WiFi)");
+        Serial.print("Connected to: ");
+        Serial.println(DATABASE_HOST);
         return true;
     }
     
@@ -514,9 +536,11 @@ bool ensureNetwork() {
     if (USE_SIM800L && connectCellular()) {
         netClient = &gsmClient;
         http = new HttpClient(*netClient, DATABASE_HOST, 443);
-        http->setHttpResponseTimeout(10000);
+        http->setHttpResponseTimeout(30000); // Increased timeout
         netReady = true;
         Serial.println("Network ready (Cellular)");
+        Serial.print("Connected to: ");
+        Serial.println(DATABASE_HOST);
         return true;
     }
     
@@ -527,6 +551,7 @@ bool ensureNetwork() {
 // Check network status and reconnect if needed
 void checkNetworkStatus() {
     if (!netReady) {
+        Serial.println("Network not ready, attempting connection...");
         ensureNetwork();
         return;
     }
@@ -534,8 +559,14 @@ void checkNetworkStatus() {
     bool networkOk = false;
     if (wifiConnected) {
         networkOk = (WiFi.status() == WL_CONNECTED);
+        if (!networkOk) {
+            Serial.println("WiFi connection lost");
+        }
     } else if (gsmConnected) {
         networkOk = modem.isGprsConnected();
+        if (!networkOk) {
+            Serial.println("Cellular connection lost");
+        }
     }
     
     if (!networkOk) {
@@ -546,6 +577,8 @@ void checkNetworkStatus() {
         delete http;
         http = nullptr;
         ensureNetwork();
+    } else {
+        Serial.println("Network status: OK");
     }
 }
 
@@ -611,6 +644,12 @@ void setup() {
     
     // Publish initial device status
     if (netReady) {
+        Serial.println("Testing Firebase connection...");
+        
+        // Test with a simple PUT request
+        String testPath = String("/test/") + String(DEVICE_ID) + String(".json");
+        httpPutJson(testPath, "\"test\"");
+        
         String path = String("/devices/") + String(DEVICE_ID) + String("/active.json");
         httpPutJson(path, "true");
         
