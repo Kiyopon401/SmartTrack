@@ -55,7 +55,7 @@ class VehicleDetailActivity : AppCompatActivity() {
         private const val MIN_UPDATE_INTERVAL_MS = 5000L // 5 seconds minimum between updates
         private const val MIN_DISTANCE_METERS = 10f // Minimum distance between points
         private const val LOCATION_UPDATE_INTERVAL = 10000L // 10 seconds
-        private const val FASTEST_UPDATE_INTERVAL = 15000L // 15 seconds
+        private const val FASTEST_UPDATE_INTERVAL = 5000L // 5 seconds
         private const val MAX_WAIT_TIME = 30000L // 30 seconds
     }
 
