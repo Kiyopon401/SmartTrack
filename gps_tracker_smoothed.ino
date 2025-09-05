@@ -114,12 +114,14 @@ const float SMOOTH_ALPHA = 0.3f;  // Lower = more smoothing (0.1-0.5)
 unsigned long lastSmoothUpdate = 0;
 const unsigned long SMOOTH_UPDATE_INTERVAL = 2000; // Update every 2 seconds
 
-// Tamper detection
+// Tamper detection - IMPROVED DEBOUNCING
 bool tamperActive = false;
 unsigned long lastTamperChangeMs = 0;
-const unsigned long TAMPER_DEBOUNCE_MS = 100;
+const unsigned long TAMPER_DEBOUNCE_MS = 2000;  // Increased to 2 seconds
 unsigned long lastTamperAlertMs = 0;
-const unsigned long TAMPER_ALERT_COOLDOWN_MS = 30000;
+const unsigned long TAMPER_ALERT_COOLDOWN_MS = 60000;  // Increased to 60 seconds
+int tamperStateCount = 0;  // Count consecutive readings
+const int TAMPER_CONFIRM_COUNT = 3;  // Need 3 consecutive readings to confirm
 
 unsigned long lastTrackPublishMs = 0;
 unsigned long lastHeartbeatMs = 0;
@@ -352,23 +354,37 @@ void sendAlertToApp(String alertMsg) {
 
 void checkTamper() {
   bool current = digitalRead(TAMPER_PIN) == HIGH;
-
-  if (current != tamperActive && (millis() - lastTamperChangeMs) >= TAMPER_DEBOUNCE_MS) {
-    tamperActive = current;
-    lastTamperChangeMs = millis();
-
-    String status = tamperActive ? "active" : "cleared";
-    Serial.printf("Tamper status: %s\n", status.c_str());
+  unsigned long now = millis();
+  
+  // Count consecutive readings of the same state
+  if (current == tamperActive) {
+    tamperStateCount = 0;  // Reset counter if state is stable
+  } else {
+    tamperStateCount++;
     
-    if (netReady) {
-      httpPutJson(pathDeviceRoot() + "/tamper/status.json", "\"" + status + "\"");
-    }
+    // Only change state if we have enough consecutive readings AND debounce time passed
+    if (tamperStateCount >= TAMPER_CONFIRM_COUNT && (now - lastTamperChangeMs) >= TAMPER_DEBOUNCE_MS) {
+      bool oldState = tamperActive;
+      tamperActive = current;
+      lastTamperChangeMs = now;
+      tamperStateCount = 0;  // Reset counter
 
-    if (tamperActive && (millis() - lastTamperAlertMs) >= TAMPER_ALERT_COOLDOWN_MS) {
-      lastTamperAlertMs = millis();
-      sendAlertToApp("TAMPER: Device enclosure opened or cable cut");
-      toneBuzzer(800);
-      Serial.println("TAMPER ALERT: Device enclosure opened!");
+      String status = tamperActive ? "active" : "cleared";
+      Serial.printf("Tamper status changed: %s (confirmed after %d readings)\n", status.c_str(), TAMPER_CONFIRM_COUNT);
+      
+      if (netReady) {
+        httpPutJson(pathDeviceRoot() + "/tamper/status.json", "\"" + status + "\"");
+      }
+
+      // Only send alert for tamper activation (not clearing) and respect cooldown
+      if (tamperActive && !oldState && (now - lastTamperAlertMs) >= TAMPER_ALERT_COOLDOWN_MS) {
+        lastTamperAlertMs = now;
+        sendAlertToApp("TAMPER: Device enclosure opened or cable cut");
+        toneBuzzer(1000);  // Longer buzzer for tamper
+        Serial.println("TAMPER ALERT: Device enclosure opened!");
+      } else if (!tamperActive && oldState) {
+        Serial.println("Tamper cleared - no alert needed");
+      }
     }
   }
 }
@@ -660,6 +676,20 @@ void onCommandReceived(const String &cmdRaw) {
   } else if (cmd == "SMOOTHED_PUBLISH") {
     Serial.println("Smoothed location publish requested");
     publishSmoothedLocation();
+  } else if (cmd == "TAMPER_TEST") {
+    Serial.println("=== TAMPER SENSOR TEST ===");
+    Serial.printf("Current pin state: %s\n", digitalRead(TAMPER_PIN) == HIGH ? "HIGH (tamper)" : "LOW (normal)");
+    Serial.printf("Tamper active: %s\n", tamperActive ? "YES" : "NO");
+    Serial.printf("State count: %d/%d\n", tamperStateCount, TAMPER_CONFIRM_COUNT);
+    Serial.printf("Last change: %lu ms ago\n", millis() - lastTamperChangeMs);
+    Serial.printf("Last alert: %lu ms ago\n", millis() - lastTamperAlertMs);
+    Serial.println("=========================");
+  } else if (cmd == "TAMPER_RESET") {
+    tamperActive = false;
+    tamperStateCount = 0;
+    lastTamperChangeMs = 0;
+    lastTamperAlertMs = 0;
+    Serial.println("Tamper state reset - all counters cleared");
   } else {
     Serial.println(F("Unknown command"));
   }
@@ -912,9 +942,9 @@ void loop() {
     gps.encode(GPSSerial.read());
   }
   
-  // Check tamper status every 100ms
+  // Check tamper status every 500ms (reduced frequency)
   static unsigned long lastTamperCheck = 0;
-  if (millis() - lastTamperCheck >= 100) {
+  if (millis() - lastTamperCheck >= 500) {
     lastTamperCheck = millis();
     checkTamper();
   }
