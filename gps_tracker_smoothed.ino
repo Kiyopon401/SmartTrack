@@ -79,6 +79,7 @@ bool gsmConnected = false;
 bool netReady = false;
 bool isTrackingContinuous = true;
 bool simPublished = false;
+bool tamperMonitorMode = false;  // Continuous tamper monitoring for testing
 
 String pairedVehicleId = "";
 String simMsisdn = "";
@@ -114,14 +115,16 @@ const float SMOOTH_ALPHA = 0.3f;  // Lower = more smoothing (0.1-0.5)
 unsigned long lastSmoothUpdate = 0;
 const unsigned long SMOOTH_UPDATE_INTERVAL = 2000; // Update every 2 seconds
 
-// Tamper detection - IMPROVED DEBOUNCING
+// Tamper detection - IMPROVED SENSITIVITY
 bool tamperActive = false;
 unsigned long lastTamperChangeMs = 0;
-const unsigned long TAMPER_DEBOUNCE_MS = 2000;  // Increased to 2 seconds
+const unsigned long TAMPER_DEBOUNCE_MS = 500;  // Reduced to 500ms for faster response
 unsigned long lastTamperAlertMs = 0;
-const unsigned long TAMPER_ALERT_COOLDOWN_MS = 60000;  // Increased to 60 seconds
+const unsigned long TAMPER_ALERT_COOLDOWN_MS = 30000;  // 30 seconds between alerts
 int tamperStateCount = 0;  // Count consecutive readings
-const int TAMPER_CONFIRM_COUNT = 3;  // Need 3 consecutive readings to confirm
+const int TAMPER_CONFIRM_COUNT = 2;  // Only need 2 consecutive readings (more sensitive)
+int tamperReadings[5] = {0};  // Store last 5 readings for better detection
+int tamperReadingIndex = 0;
 
 unsigned long lastTrackPublishMs = 0;
 unsigned long lastHeartbeatMs = 0;
@@ -356,35 +359,43 @@ void checkTamper() {
   bool current = digitalRead(TAMPER_PIN) == HIGH;
   unsigned long now = millis();
   
-  // Count consecutive readings of the same state
-  if (current == tamperActive) {
-    tamperStateCount = 0;  // Reset counter if state is stable
-  } else {
-    tamperStateCount++;
+  // Store reading in circular buffer
+  tamperReadings[tamperReadingIndex] = current ? 1 : 0;
+  tamperReadingIndex = (tamperReadingIndex + 1) % 5;
+  
+  // Count how many recent readings show tamper state
+  int tamperCount = 0;
+  for (int i = 0; i < 5; i++) {
+    if (tamperReadings[i] == 1) tamperCount++;
+  }
+  
+  // Determine if we should consider this a tamper state
+  // If 3 or more of the last 5 readings show tamper, consider it tampered
+  bool shouldBeTampered = tamperCount >= 3;
+  
+  // Only change state if different from current state and debounce time passed
+  if (shouldBeTampered != tamperActive && (now - lastTamperChangeMs) >= TAMPER_DEBOUNCE_MS) {
+    bool oldState = tamperActive;
+    tamperActive = shouldBeTampered;
+    lastTamperChangeMs = now;
+
+    String status = tamperActive ? "active" : "cleared";
+    Serial.printf("Tamper status changed: %s (detected in %d/5 recent readings)\n", status.c_str(), tamperCount);
+    Serial.printf("Raw readings: [%d,%d,%d,%d,%d]\n", 
+                  tamperReadings[0], tamperReadings[1], tamperReadings[2], tamperReadings[3], tamperReadings[4]);
     
-    // Only change state if we have enough consecutive readings AND debounce time passed
-    if (tamperStateCount >= TAMPER_CONFIRM_COUNT && (now - lastTamperChangeMs) >= TAMPER_DEBOUNCE_MS) {
-      bool oldState = tamperActive;
-      tamperActive = current;
-      lastTamperChangeMs = now;
-      tamperStateCount = 0;  // Reset counter
+    if (netReady) {
+      httpPutJson(pathDeviceRoot() + "/tamper/status.json", "\"" + status + "\"");
+    }
 
-      String status = tamperActive ? "active" : "cleared";
-      Serial.printf("Tamper status changed: %s (confirmed after %d readings)\n", status.c_str(), TAMPER_CONFIRM_COUNT);
-      
-      if (netReady) {
-        httpPutJson(pathDeviceRoot() + "/tamper/status.json", "\"" + status + "\"");
-      }
-
-      // Only send alert for tamper activation (not clearing) and respect cooldown
-      if (tamperActive && !oldState && (now - lastTamperAlertMs) >= TAMPER_ALERT_COOLDOWN_MS) {
-        lastTamperAlertMs = now;
-        sendAlertToApp("TAMPER: Device enclosure opened or cable cut");
-        toneBuzzer(1000);  // Longer buzzer for tamper
-        Serial.println("TAMPER ALERT: Device enclosure opened!");
-      } else if (!tamperActive && oldState) {
-        Serial.println("Tamper cleared - no alert needed");
-      }
+    // Only send alert for tamper activation (not clearing) and respect cooldown
+    if (tamperActive && !oldState && (now - lastTamperAlertMs) >= TAMPER_ALERT_COOLDOWN_MS) {
+      lastTamperAlertMs = now;
+      sendAlertToApp("TAMPER: Device enclosure opened or cable cut");
+      toneBuzzer(1000);  // Longer buzzer for tamper
+      Serial.println("TAMPER ALERT: Device enclosure opened!");
+    } else if (!tamperActive && oldState) {
+      Serial.println("Tamper cleared - no alert needed");
     }
   }
 }
@@ -680,7 +691,13 @@ void onCommandReceived(const String &cmdRaw) {
     Serial.println("=== TAMPER SENSOR TEST ===");
     Serial.printf("Current pin state: %s\n", digitalRead(TAMPER_PIN) == HIGH ? "HIGH (tamper)" : "LOW (normal)");
     Serial.printf("Tamper active: %s\n", tamperActive ? "YES" : "NO");
-    Serial.printf("State count: %d/%d\n", tamperStateCount, TAMPER_CONFIRM_COUNT);
+    Serial.printf("Recent readings: [%d,%d,%d,%d,%d]\n", 
+                  tamperReadings[0], tamperReadings[1], tamperReadings[2], tamperReadings[3], tamperReadings[4]);
+    int tamperCount = 0;
+    for (int i = 0; i < 5; i++) {
+      if (tamperReadings[i] == 1) tamperCount++;
+    }
+    Serial.printf("Tamper count: %d/5 (need 3+ for tamper)\n", tamperCount);
     Serial.printf("Last change: %lu ms ago\n", millis() - lastTamperChangeMs);
     Serial.printf("Last alert: %lu ms ago\n", millis() - lastTamperAlertMs);
     Serial.println("=========================");
@@ -689,7 +706,18 @@ void onCommandReceived(const String &cmdRaw) {
     tamperStateCount = 0;
     lastTamperChangeMs = 0;
     lastTamperAlertMs = 0;
-    Serial.println("Tamper state reset - all counters cleared");
+    // Clear reading buffer
+    for (int i = 0; i < 5; i++) {
+      tamperReadings[i] = 0;
+    }
+    tamperReadingIndex = 0;
+    Serial.println("Tamper state reset - all counters and readings cleared");
+  } else if (cmd == "TAMPER_MONITOR") {
+    tamperMonitorMode = !tamperMonitorMode;
+    Serial.printf("Tamper monitor mode: %s\n", tamperMonitorMode ? "ON" : "OFF");
+    if (tamperMonitorMode) {
+      Serial.println("Watch the readings as you move the magnets...");
+    }
   } else {
     Serial.println(F("Unknown command"));
   }
@@ -942,11 +970,22 @@ void loop() {
     gps.encode(GPSSerial.read());
   }
   
-  // Check tamper status every 500ms (reduced frequency)
+  // Check tamper status every 200ms (more frequent for better sensitivity)
   static unsigned long lastTamperCheck = 0;
-  if (millis() - lastTamperCheck >= 500) {
+  if (millis() - lastTamperCheck >= 200) {
     lastTamperCheck = millis();
     checkTamper();
+    
+    // Continuous monitoring for testing
+    if (tamperMonitorMode) {
+      bool current = digitalRead(TAMPER_PIN) == HIGH;
+      int tamperCount = 0;
+      for (int i = 0; i < 5; i++) {
+        if (tamperReadings[i] == 1) tamperCount++;
+      }
+      Serial.printf("TAMPER MONITOR: Pin=%s, Count=%d/5, Active=%s\n", 
+                    current ? "HIGH" : "LOW", tamperCount, tamperActive ? "YES" : "NO");
+    }
   }
   
   // Update smoothed coordinates every 2 seconds
