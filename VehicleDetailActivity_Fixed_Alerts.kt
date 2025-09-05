@@ -237,12 +237,12 @@ class VehicleDetailActivity : AppCompatActivity() {
             title = "Geofence Alert",
             message = message,
             isUrgent = true,
-            positiveButtonText = "Check Vehicle",
+            positiveButtonText = "Show Location",
             negativeButtonText = "Dismiss"
         ) { action ->
             when (action) {
                 "check" -> {
-                    // Open Google Maps to vehicle location
+                    // Show vehicle location on our Mapbox map
                     openGoogleMaps()
                 }
                 "dismiss" -> {
@@ -307,12 +307,12 @@ class VehicleDetailActivity : AppCompatActivity() {
             title = "TAMPER ALERT",
             message = message,
             isUrgent = true,
-            positiveButtonText = "Check Vehicle",
+            positiveButtonText = "Show Location",
             negativeButtonText = "Call Emergency"
         ) { action ->
             when (action) {
                 "check" -> {
-                    // Open Google Maps to vehicle location
+                    // Show vehicle location on our Mapbox map
                     openGoogleMaps()
                 }
                 "emergency" -> {
@@ -395,25 +395,40 @@ class VehicleDetailActivity : AppCompatActivity() {
         }
     }
     
-    private fun openGoogleMaps() {
-        try {
-            val vehicle = currentVehicle
-            if (vehicle != null) {
-                // Get last known location from ViewModel
-                val lastLocation = viewModel.getLastKnownLocation(vehicle.id)
-                if (lastLocation != null) {
-                    val uri = "geo:${lastLocation.first},${lastLocation.second}?q=${lastLocation.first},${lastLocation.second}(Vehicle Location)"
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri))
-                    startActivity(intent)
-                } else {
-                    Toast.makeText(this, "No location data available", Toast.LENGTH_SHORT).show()
+                    private fun openGoogleMaps() {
+                    try {
+                        // Since we're using Mapbox, just show the location in our own map
+                        val vehicle = currentVehicle
+                        if (vehicle != null) {
+                            // Get last known location from ViewModel
+                            val lastLocation = viewModel.getLastKnownLocation(vehicle.id)
+                            if (lastLocation != null) {
+                                // Update our Mapbox map to show the vehicle location
+                                MapUtils.updateMapLocation(
+                                    binding.mapWebView,
+                                    lastLocation.first,
+                                    lastLocation.second,
+                                    currentVehicle.nickname,
+                                    true
+                                )
+                                
+                                // Show coordinates in a toast
+                                Toast.makeText(
+                                    this, 
+                                    "Vehicle location: ${String.format("%.6f", lastLocation.first)}, ${String.format("%.6f", lastLocation.second)}", 
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                
+                                Log.d(TAG, "Updated Mapbox map to show vehicle location: ${lastLocation.first}, ${lastLocation.second}")
+                            } else {
+                                Toast.makeText(this, "No location data available", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error updating map location", e)
+                        Toast.makeText(this, "Error updating map", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error opening Google Maps", e)
-            Toast.makeText(this, "Error opening maps", Toast.LENGTH_SHORT).show()
-        }
-    }
     
     private fun openPhoneDialer() {
         try {
